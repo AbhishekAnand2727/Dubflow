@@ -1,10 +1,10 @@
 # DubFlow
 
-**DubFlow** is an AI dubbing application that automatically translates and dubs videos into 11 Indian languages. It features a modern, responsive "Warm SaaS" UI and a robust backend pipeline leveraging Gemini 2.5 pro ASR, Gemini 2.5 pro MT and Google Cloud TTS.
+**DubFlow** is an AI dubbing application that automatically translates and dubs videos into 11 Indian languages. It features a robust backend pipeline leveraging Gemini 2.5 pro ASR, Gemini 2.5 pro MT and Google Cloud TTS and modern, responsive "Warm SaaS" UI.
 
-![DubFlow Dashboard](file:///C:/Users/anand/.gemini/antigravity/brain/cf7d9d42-5b9a-4d78-a4a7-235a6e5716ac/subtle_blur_check_1764602643378.png)
+![DubFlow Dashboard](image%20copy.png)
 
-##  Features
+## Features
 
 -   **Multi-Language Support**: Dub content into Hindi, Tamil, Telugu, Kannada, Malayalam, Marathi, Gujarati, Punjabi, Assamese, and Odia.
 -   **End-to-End Pipeline**: Automated ASR (Transcription), MT (Translation), and TTS (Speech Synthesis).
@@ -15,7 +15,7 @@
 -   **Persistence**: Automatically saves task history and restores it on server restart.
 -   **Auto-Cleanup**: Automatically syncs the dashboard with the file system, removing deleted videos.
 
-## 🛠️ Technology Stack
+## Technology Stack
 
 ### Frontend
 -   **Framework**: [React 18](https://react.dev/)
@@ -29,10 +29,10 @@
 -   **Server**: [Uvicorn](https://www.uvicorn.org/)
 -   **Audio Processing**: `ffmpeg`, `pydub`
 -   **AI Models**:
-    -   **ASR & MT**: Google Gemini 1.5 Flash (via `google.generativeai`)
+    -   **ASR & MT**: Google Gemini 2.5 Pro (via `google.generativeai`)
     -   **TTS**: Google Cloud Text-to-Speech
 
-## 🧠 AI Pipeline Architecture
+## AI Pipeline Architecture
 
 The core of DubFlow is an advanced orchestration of **Gemini 2.5 Pro** and **Google Cloud TTS**, handled by `google_pipeline2.py`. Here is the step-by-step workflow:
 
@@ -73,7 +73,7 @@ The core of DubFlow is an advanced orchestration of **Gemini 2.5 Pro** and **Goo
 -   **Mixing**: Merges the new dubbed audio track with the original video.
 -   **Ducking**: Lowers the volume of the original background audio when speech is present, ensuring the dub is clear while retaining ambient sound.
 
-## 📦 Installation & Run
+##  Installation & Run
 
 ### Prerequisites
 -   Node.js & npm
@@ -131,5 +131,4 @@ DubFlow/
 └── README.md                  # This file
 ```
 
-## 📝 License
-MIT
+### Done by Abhishek Anand
