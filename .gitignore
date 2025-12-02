@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+venv/
+__pycache__/
+*.pyc
+
+# Environment Variables
+.env
+.env.local
+.env.*
+
+# Generated Media (Videos, Audio)
+*.mp4
+*.mp3
+*.wav
+*.mkv
+*.mov
+*.avi
+Backend/Video out/
+Backend/Videos/uploads/
+Backend/SRT/
+
+# Logs
+*.log
+npm-debug.log*
+
+# IDEs
+.vscode/
+.idea/
+
+# System
+.DS_Store
+Thumbs.db
