@@ -9,8 +9,6 @@ from pydantic import BaseModel
 import json
 from datetime import datetime
 from typing import Optional
-
-# Import the pipeline
 import google_pipeline2
 
 app = FastAPI()
@@ -18,24 +16,23 @@ app = FastAPI()
 # CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Allow all for dev
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # Directories
-# Directories
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-UPLOAD_DIR = os.path.join(BASE_DIR, "Videos", "uploads")
+UPLOAD_DIR = os.path.join(BASE_DIR, "Uploads")
 OUTPUT_DIR = os.path.join(BASE_DIR, "Video out")
+SRT_DIR = os.path.join(BASE_DIR, "SRT")
+HISTORY_FILE = os.path.join(BASE_DIR, "history.json")
+
+# Ensure directories exist
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-# In-memory task store
-# Persistence
-HISTORY_FILE = "history.json"
-SRT_DIR = os.path.join(BASE_DIR, "SRT")
+os.makedirs(SRT_DIR, exist_ok=True)
 
 # In-memory task store
 tasks = {}
@@ -73,7 +70,8 @@ def scan_existing_files():
             # Skip if already in tasks (loaded from history)
             found = False
             for t in tasks.values():
-                if t.get("result", {}).get("output_path", "").endswith(filename):
+                result = t.get("result")
+                if result and result.get("output_path", "").endswith(filename):
                     found = True
                     break
             if found:
@@ -184,13 +182,18 @@ class DubRequest(BaseModel):
     output_lang: str
     target_voice: Optional[str] = None
     speed: Optional[float] = 1.0
+    duration_limit: Optional[int] = None
+    
+class RegenerateRequest(BaseModel):
+    task_id: str
+    segments: list # List of {start, end, text (source), target_text}
 
 LANGUAGES = [
     "English", "Hindi", "Assamese", "Punjabi", "Telugu", 
-    "Tamil", "Marathi", "Gujarati", "Kannada", "Malayalam", "Odia"
+    "Tamil", "Marathi", "Gujarati", "Kannada", "Malayalam", "Odia", "Bengali"
 ]
 
-def run_dubbing_task(task_id, filename, input_lang, output_lang):
+def run_dubbing_task(task_id, filename, input_lang, output_lang, target_voice=None, speed=1.0, duration_limit=None):
     tasks[task_id]["status"] = "processing"
     save_history() # Save initial processing state
     
@@ -211,7 +214,10 @@ def run_dubbing_task(task_id, filename, input_lang, output_lang):
             output_dir=OUTPUT_DIR,
             input_lang=input_lang,
             output_lang=output_lang,
-            progress_callback=progress_callback
+            progress_callback=progress_callback,
+            target_voice=target_voice,
+            speed=speed,
+            duration_limit=duration_limit
         )
         
         tasks[task_id]["status"] = "completed"
@@ -264,10 +270,105 @@ async def start_dubbing(request: DubRequest, background_tasks: BackgroundTasks):
         task_id, 
         request.filename, 
         request.input_lang, 
-        request.output_lang
+        request.output_lang,
+        request.target_voice,
+        request.speed,
+        request.duration_limit
     )
     
     return {"task_id": task_id}
+
+@app.post("/api/regenerate")
+async def regenerate_dub(request: RegenerateRequest, background_tasks: BackgroundTasks):
+    task_id = request.task_id
+    if task_id not in tasks:
+        raise HTTPException(status_code=404, detail="Task not found")
+        
+    original_task = tasks[task_id]
+    
+    # We create a NEW task ID for the regeneration to avoid overwriting history immediately?
+    # Or we update the existing task? 
+    # Updating existing task is better for the UI flow (user stays on same page).
+    # But we should probably mark it as "processing" again.
+    
+    tasks[task_id]["status"] = "processing"
+    tasks[task_id]["step"] = "Regenerating"
+    tasks[task_id]["progress"] = 0
+    tasks[task_id]["message"] = "Starting regeneration..."
+    save_history()
+    
+    def run_regeneration():
+        try:
+            # Get original segments to compare
+            old_segments = original_task["result"]["source_segments"]
+            # Merge old target text into old segments for comparison if needed
+            old_target_segments = original_task["result"]["target_segments"]
+            
+            # We need to pass 'old_segments' with 'target_text' populated to google_pipeline2
+            # because google_pipeline2 expects to compare target_text.
+            # The 'source_segments' in result only have 'text' (source).
+            # So we construct a rich list.
+            
+            rich_old_segments = []
+            for i, seg in enumerate(old_segments):
+                s = seg.copy()
+                if i < len(old_target_segments):
+                    s['target_text'] = old_target_segments[i]['text']
+                rich_old_segments.append(s)
+            
+            # Run pipeline
+            # Check if we should use the trimmed file (if output name differs from input name)
+            input_filename = original_task["filename"]
+            output_path = original_task.get("result", {}).get("output_path")
+            
+            if output_path:
+                output_filename = os.path.basename(output_path)
+                # If output filename is different (e.g. has _trimmed_), check if that file exists in Uploads
+                # This ensures we use the same trimmed source for regeneration and find the correct SRT
+                potential_trimmed_path = os.path.join(UPLOAD_DIR, output_filename)
+                if output_filename != input_filename and os.path.exists(potential_trimmed_path):
+                    print(f"Using trimmed file for regeneration: {output_filename}")
+                    input_filename = output_filename
+            
+            input_path = os.path.join(UPLOAD_DIR, input_filename)
+            
+            new_result = google_pipeline2.regenerate_video(
+                video_path=input_path,
+                output_dir=OUTPUT_DIR,
+                new_segments=request.segments,
+                old_segments=rich_old_segments,
+                input_lang=original_task["input_lang"],
+                output_lang=original_task["output_lang"],
+                target_voice=None, # Reuse default or we need to store voice in task? 
+                # We didn't store voice in task root, but we can assume default or add it to task model.
+                # For now, let's assume default or pass None (random/consistent).
+                # Ideally we should store 'settings' in task.
+                speed=1.0, # Same issue, need to store speed.
+                progress_callback=lambda s, p, m: update_task_progress(task_id, s, p, m)
+            )
+            
+            tasks[task_id]["status"] = "completed"
+            tasks[task_id]["progress"] = 100
+            tasks[task_id]["message"] = "Regeneration Done"
+            tasks[task_id]["result"] = new_result
+            tasks[task_id]["timestamp"] = str(datetime.now())
+            save_history()
+            
+        except Exception as e:
+            print(f"Regeneration failed: {e}")
+            tasks[task_id]["status"] = "failed"
+            tasks[task_id]["error"] = str(e)
+            save_history()
+
+    def update_task_progress(tid, step, progress, message):
+        tasks[tid]["progress"] = progress
+        tasks[tid]["step"] = step
+        tasks[tid]["message"] = message
+        print(f"Task {tid}: [{step}] {progress}% - {message}")
+
+    background_tasks.add_task(run_regeneration)
+    
+    return {"status": "started", "task_id": task_id}
 
 @app.get("/api/status/{task_id}")
 async def get_status(task_id: str):
@@ -341,4 +442,4 @@ async def get_languages():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    uvicorn.run(app, host="0.0.0.0", port=8002)

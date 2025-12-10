@@ -77,7 +77,10 @@ def get_api_key():
     return GEMINI_API_KEY
 
 # Add ffmpeg to PATH
-os.environ["PATH"] += os.pathsep + r"C:\Users\anand\miniconda3\envs\tf_env\Library\bin"
+
+# Add ffmpeg to PATH (Assuming system install or local bin)
+# os.environ["PATH"] += os.pathsep + r"C:\Users\anand\miniconda3\envs\tf_env\Library\bin"
+
 
 # --- Infrastructure Classes ---
 
@@ -202,7 +205,7 @@ def wait_for_files_active(files):
 
 # ## 1. ASR (Gemini 2.5 Pro)
 
-def split_audio_chunks(video_path, chunk_length_ms=180000):
+def split_audio_chunks(video_path, chunk_length_ms=300000):
     """
     Splits audio from video into chunks using ffmpeg (faster than pydub).
     Returns list of chunk file paths and the temp directory.
@@ -249,11 +252,74 @@ class VoiceManager:
             "en-IN-Standard-A", # Female
             "en-IN-Standard-D", # Female
         ]
+        
+        # Chirp 3 Personalities
+        self.chirp_3_personalities = {
+            "Aoede": "Female",
+            "Kore": "Female",
+            "Leda": "Female",
+            "Zephyr": "Female",
+            "Erinome": "Female",
+            "Puck": "Male",
+            "Charon": "Male",
+            "Fenrir": "Male",
+            "Orus": "Male",
+            "Achird": "Male",
+            "Alnilam": "Male",
+            "Enceladus": "Male",
+            "Achernar": "Female",
+            "Algenib": "Male",
+            "Algieba": "Male",
+            "Autonoe": "Female",
+            "Callirrhoe": "Female",
+            "Despina": "Female",
+            "Gacrux": "Female",
+            "Iapetus": "Male",
+            "Laomedeia": "Female",
+            "Pulcherrima": "Female",
+            "Rasalgethi": "Male",
+            "Sadachbia": "Male",
+            "Sadaltager": "Male",
+            "Schedar": "Male",
+            "Sulafat": "Female",
+            "Umbriel": "Male",
+            "Vindemiatrix": "Female",
+            "Zubenelgenubi": "Male"
+        }
+        
         self.speaker_map = {}
         self.lock = threading.Lock()
 
-    def get_voice(self, speaker_label):
-        with self.lock:
+    def get_voice(self, speaker_label, voice_preference=None, output_lang="English"):
+            # Check if specific Chirp voice is requested
+            if voice_preference and "Chirp 3" in voice_preference:
+                # Extract personality from preference string e.g. "Female (Chirp 3 - Aoede)"
+                personality = None
+                for p in self.chirp_3_personalities:
+                    if p in voice_preference:
+                        personality = p
+                        break
+                
+                if personality:
+                    # Map output language to BCP-47 code
+                    lang_code = "en-IN" # Default
+                    LANGUAGE_CODE_MAP = {
+                        "English": "en-IN",
+                        "Hindi": "hi-IN",
+                        "Tamil": "ta-IN",
+                        "Telugu": "te-IN",
+                        "Kannada": "kn-IN",
+                        "Malayalam": "ml-IN",
+                        "Marathi": "mr-IN",
+                        "Gujarati": "gu-IN",
+                        "Bengali": "bn-IN",
+                        "Punjabi": "pa-IN"
+                    }
+                    lang_code = LANGUAGE_CODE_MAP.get(output_lang, "en-IN")
+                    
+                    # Construct Dynamic ID: {lang_code}-Chirp3-HD-{personality}
+                    return f"{lang_code}-Chirp3-HD-{personality}"
+
             if not speaker_label:
                 return "en-IN-Neural2-B" # Default
             
@@ -453,7 +519,7 @@ def merge_segments_to_sentences(srt_content):
         lines.append(f"{i+1}\n{s} --> {e}\n{speaker_tag}{seg['text']}\n")
     return "\n".join(lines)
 
-def generate_srt_gemini(video_path, input_lang="Tamil", model="gemini-2.5-pro", duration_limit=None):
+def generate_srt_gemini(video_path, input_lang="English", model="gemini-2.5-pro", duration_limit=None):
     """Generates SRT using Gemini with updated prompt for silence/noise/diarization."""
     chunk_size_ms = 300000
     chunk_paths, temp_dir = split_audio_chunks(video_path, chunk_length_ms=chunk_size_ms)
@@ -502,34 +568,40 @@ def generate_srt_gemini(video_path, input_lang="Tamil", model="gemini-2.5-pro", 
         """
         
         generation_config = {"temperature": 0.0}
-        try:
-            def _generate():
-                return get_client().models.generate_content(
-                    model=model,
-                    contents=[chunk_file, prompt],
-                    config=generation_config
-                )
-            response = retry_manager.call(_generate)
-            offset_ms = i * chunk_size_ms
-            segments = parse_gemini_json(response.text, offset_ms=offset_ms)
-            
-            # Validate timestamps
-            if segments:
-                last_end = segments[-1]['end']
-                chunk_end_limit = offset_ms + chunk_size_ms + 5000 # 5s tolerance
-                if last_end > chunk_end_limit:
-                    print(f"WARNING: Chunk {i+1} hallucinated timestamps! End: {last_end} > Limit: {chunk_end_limit}. Retrying...")
-                    raise ValueError("Timestamp hallucination detected")
-            else:
-                print(f"WARNING: Chunk {i+1} returned empty segments. Retrying...")
-                raise ValueError("Empty ASR response")
-            
-            cache.set(cache_key, segments)
-            return segments
-        except Exception as e:
-            print(f"Error processing chunk {i+1}: {e}")
-            # If all retries fail, return empty list but log critical warning
-            return []
+        
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                def _generate():
+                    return get_client().models.generate_content(
+                        model=model,
+                        contents=[chunk_file, prompt],
+                        config=generation_config
+                    )
+                # retry_manager handles API errors (500s, etc)
+                response = retry_manager.call(_generate)
+                offset_ms = i * chunk_size_ms
+                segments = parse_gemini_json(response.text, offset_ms=offset_ms)
+                
+                # Validate timestamps
+                if segments:
+                    last_end = segments[-1]['end']
+                    chunk_end_limit = offset_ms + chunk_size_ms + 5000 # 5s tolerance
+                    if last_end > chunk_end_limit:
+                        print(f"WARNING: Chunk {i+1} hallucinated timestamps (Attempt {attempt+1}/{max_retries})! End: {last_end} > Limit: {chunk_end_limit}. Retrying...")
+                        continue # Retry loop
+                else:
+                    print(f"WARNING: Chunk {i+1} returned empty segments (Attempt {attempt+1}/{max_retries}). Retrying...")
+                    continue # Retry loop
+                
+                cache.set(cache_key, segments)
+                return segments
+            except Exception as e:
+                print(f"Error processing chunk {i+1} (Attempt {attempt+1}/{max_retries}): {e}")
+                # If it's the last attempt, we let it fall through to raise
+        
+        # If we get here, all retries failed
+        raise ValueError(f"Failed to transcribe chunk {i+1} after {max_retries} attempts due to hallucinations or errors.")
 
     try:
         with ThreadPoolExecutor(max_workers=3) as executor:
@@ -540,16 +612,19 @@ def generate_srt_gemini(video_path, input_lang="Tamil", model="gemini-2.5-pro", 
                 try:
                     results[index] = future.result()
                 except Exception as e:
-                    print(f"Chunk {index+1} exception: {e}")
-                    results[index] = []
+                    print(f"Chunk {index+1} FAILED: {e}")
+                    raise e # Abort the whole process
+            
             for res in results:
-                if res: all_segments.extend(res)
+                if res is None:
+                    raise ValueError("One or more chunks failed to process.")
+                all_segments.extend(res)
     finally:
         if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
             
     return segments_to_srt(all_segments)
 
-def translate_adaptive(text, target_duration_sec, input_lang="Tamil", output_lang="English", feedback=None, current_text=None, word_budget=None, time_diff=None):
+def translate_adaptive(text, target_duration_sec, input_lang="English", output_lang="Hindi", feedback=None, current_text=None, word_budget=None, time_diff=None):
     """Adaptive translation with user's specific feedback prompts."""
     target_chars = int(target_duration_sec * 15)
     
@@ -587,9 +662,7 @@ def translate_adaptive(text, target_duration_sec, input_lang="Tamil", output_lan
     {extra_instruction}
 
     CRITICAL INSTRUCTION:
-    You MUST write the output in {target_script}. 
-    DO NOT use Latin/Roman characters. 
-    DO NOT use Transliteration.
+    You MUST write the output in {target_script}.Keep Technical terms in English(Latin Script) 
     Example: If translating to Hindi, write "नमस्ते", NOT "Namaste".
 
     CONSTRAINTS:
@@ -597,8 +670,10 @@ def translate_adaptive(text, target_duration_sec, input_lang="Tamil", output_lan
     2. ADAPTATION:
        - If text is short but duration is long, ELABORATE naturally.
        - If text is long but duration is short, SUMMARIZE.
-    3. TONE: Casual and calm.
-    4. OUTPUT: Return ONLY the translated text in {target_script}.
+    3. TRANSLATION: Translation must be in casual, spoken {output_lang}. It should NOT be in formal and textbook language.  
+    4. TONE: Casual and calm.
+    5. OUTPUT: Return ONLY the translated text in {target_script}.
+    6. Technical Terms: Do not translate technical terms. keep them in English.`
     """
     
     cache_key = f"mt_{text}_{target_duration_sec}_{feedback}_{output_lang}"
@@ -616,7 +691,7 @@ def translate_adaptive(text, target_duration_sec, input_lang="Tamil", output_lan
         print(f"Translation error: {e}")
         return text
 
-def generate_google_tts(text, api_key, voice_name="en-IN-Neural2-B", speaking_rate=0.8):
+def generate_google_tts(text, api_key, voice_name="en-IN-Chirp3-HD-Achird", speaking_rate=0.9):
     """Generates audio using Google Cloud TTS."""
     if not text or not text.strip(): return None
     
@@ -631,11 +706,33 @@ def generate_google_tts(text, api_key, voice_name="en-IN-Neural2-B", speaking_ra
         "audioConfig": {"audioEncoding": "LINEAR16", "speakingRate": speaking_rate}
     }
     
+    # Chirp requires specific config
+    if "Chirp" in voice_name:
+        # Extract language code from voice name (e.g., "ta-IN" from "ta-IN-Chirp3-HD-Aoede")
+        parts = voice_name.split("-")
+        if len(parts) >= 2:
+            payload["voice"]["languageCode"] = f"{parts[0]}-{parts[1]}"
+        else:
+            payload["voice"]["languageCode"] = "en-IN" # Fallback
+
+    
     def _call_tts():
         response = requests.post(url, json=payload)
         if response.status_code == 200:
             return base64.b64decode(response.json().get('audioContent'))
-        return None
+        else:
+            # Fallback for Chirp failures (e.g. language not supported for specific personality)
+            if "Chirp" in voice_name:
+                print(f"  -> Chirp voice {voice_name} failed (Status {response.status_code}). Falling back to Neural2...")
+                fallback_voice = "en-IN-Neural2-B" # Generic fallback
+                payload["voice"]["name"] = fallback_voice
+                payload["voice"]["languageCode"] = "en-IN"
+                response_retry = requests.post(url, json=payload)
+                if response_retry.status_code == 200:
+                    return base64.b64decode(response_retry.json().get('audioContent'))
+            
+            print(f"TTS Error: {response.text}")
+            return None
         
     audio_bytes = retry_manager.call(_call_tts)
     if audio_bytes: cache.set(cache_key, audio_bytes)
@@ -690,8 +787,8 @@ def parse_srt(srt_content):
             seg['speaker'] = 'Speaker 1'
     return segments
 
-def process_segment_task(seg, i, total, input_lang, output_lang):
-    """Processes a single segment with feedback loop and atempo fallback."""
+def process_segment_task(seg, i, total, input_lang, output_lang, target_voice=None, speed=1.0, forced_target_text=None):
+    """Processes a single segment. If forced_target_text is provided, skips MT and text adaptation."""
     source_text = seg['text']
     start_time = seg['start']
     end_time = seg['end']
@@ -704,14 +801,20 @@ def process_segment_task(seg, i, total, input_lang, output_lang):
     if "[SILENCE]" in source_text.upper() or "[NOISE" in source_text.upper():
         return i, AudioSegment.silent(duration=target_duration_ms), source_text, start_time, end_time
 
-    voice_name = voice_manager.get_voice(speaker)
-    current_translated_text = translate_adaptive(source_text, target_duration_sec, input_lang, output_lang)
+    voice_name = voice_manager.get_voice(speaker, voice_preference=target_voice, output_lang=output_lang)
+    
+    # Determine Target Text
+    if forced_target_text:
+        current_translated_text = forced_target_text
+        # If forced, we skip the adaptive MT step
+    else:
+        current_translated_text = translate_adaptive(source_text, target_duration_sec, input_lang, output_lang)
     
     best_audio = None
     best_text = current_translated_text
     
     # 1. Try normal generation
-    audio_bytes = generate_google_tts(current_translated_text, get_api_key(), voice_name=voice_name)
+    audio_bytes = generate_google_tts(current_translated_text, get_api_key(), voice_name=voice_name, speaking_rate=speed)
     if audio_bytes:
         audio = AudioSegment.from_file(io.BytesIO(audio_bytes), format="wav")
         
@@ -719,37 +822,39 @@ def process_segment_task(seg, i, total, input_lang, output_lang):
         diff_ms = len(audio) - target_duration_ms
         print(f"  -> Target: {target_duration_sec:.2f}s | Generated: {len(audio)/1000:.2f}s | Diff: {diff_ms/1000:+.2f}s")
 
-        # 2. Feedback Loop (Prioritize Text Adaptation)
-        # Check if Too Long (Strict trigger for summarization)
-        if diff_ms > 500: # If > 0.5s longer
-            gap = diff_ms / 1000.0
-            print(f"  -> Too long by {gap:.2f}s. Attempting to SUMMARIZE...")
-            current_translated_text = translate_adaptive(source_text, target_duration_sec, input_lang, output_lang, feedback="summarize", time_diff=gap)
-            audio_bytes_v2 = generate_google_tts(current_translated_text, get_api_key(), voice_name=voice_name)
-            if audio_bytes_v2:
-                audio_v2 = AudioSegment.from_file(io.BytesIO(audio_bytes_v2), format="wav")
-                # If shorter than original, take it.
-                if len(audio_v2) < len(audio):
-                    audio = audio_v2
-                    best_text = current_translated_text
-                    diff_ms = len(audio) - target_duration_ms # Recalculate diff
-                    print(f"  -> New Duration: {len(audio)/1000:.2f}s | Diff: {diff_ms/1000:+.2f}s")
+        # 2. Feedback Loop (ONLY if NOT forced text)
+        if not forced_target_text:
+            # Check if Too Long (Strict trigger for summarization)
+            if diff_ms > 500: # If > 0.5s longer
+                gap = diff_ms / 1000.0
+                print(f"  -> Too long by {gap:.2f}s. Attempting to SUMMARIZE...")
+                current_translated_text = translate_adaptive(source_text, target_duration_sec, input_lang, output_lang, feedback="summarize", time_diff=gap)
+                audio_bytes_v2 = generate_google_tts(current_translated_text, get_api_key(), voice_name=voice_name, speaking_rate=speed)
+                if audio_bytes_v2:
+                    audio_v2 = AudioSegment.from_file(io.BytesIO(audio_bytes_v2), format="wav")
+                    # If shorter than original, take it.
+                    if len(audio_v2) < len(audio):
+                        audio = audio_v2
+                        best_text = current_translated_text
+                        diff_ms = len(audio) - target_duration_ms # Recalculate diff
+                        print(f"  -> New Duration: {len(audio)/1000:.2f}s | Diff: {diff_ms/1000:+.2f}s")
 
-        # Check if Too Short (Elaborate)
-        elif diff_ms < -500: # If > 0.5s shorter
-            gap = abs(diff_ms) / 1000.0
-            print(f"  -> Too short by {gap:.2f}s. Attempting to ELABORATE...")
-            current_translated_text = translate_adaptive(source_text, target_duration_sec, input_lang, output_lang, feedback="elaborate", time_diff=gap)
-            audio_bytes_v2 = generate_google_tts(current_translated_text, get_api_key(), voice_name=voice_name)
-            if audio_bytes_v2:
-                audio_v2 = AudioSegment.from_file(io.BytesIO(audio_bytes_v2), format="wav")
-                if len(audio_v2) > len(audio): # Accepted if longer
-                    audio = audio_v2
-                    best_text = current_translated_text
-                    diff_ms = len(audio) - target_duration_ms # Recalculate diff
-                    print(f"  -> New Duration: {len(audio)/1000:.2f}s | Diff: {diff_ms/1000:+.2f}s")
+            # Check if Too Short (Elaborate)
+            elif diff_ms < -500: # If > 0.5s shorter
+                gap = abs(diff_ms) / 1000.0
+                print(f"  -> Too short by {gap:.2f}s. Attempting to ELABORATE...")
+                current_translated_text = translate_adaptive(source_text, target_duration_sec, input_lang, output_lang, feedback="elaborate", time_diff=gap)
+                audio_bytes_v2 = generate_google_tts(current_translated_text, get_api_key(), voice_name=voice_name, speaking_rate=speed)
+                if audio_bytes_v2:
+                    audio_v2 = AudioSegment.from_file(io.BytesIO(audio_bytes_v2), format="wav")
+                    if len(audio_v2) > len(audio): # Accepted if longer
+                        audio = audio_v2
+                        best_text = current_translated_text
+                        diff_ms = len(audio) - target_duration_ms # Recalculate diff
+                        print(f"  -> New Duration: {len(audio)/1000:.2f}s | Diff: {diff_ms/1000:+.2f}s")
 
         # 3. Final Speed Adjustment (atempo) if still too long
+        # We apply this even for forced text to ensure sync
         if len(audio) > target_duration_ms:
             speed_factor = len(audio) / target_duration_ms
             if speed_factor > 1.02: # Only if > 2% diff
@@ -777,7 +882,7 @@ def process_segment_task(seg, i, total, input_lang, output_lang):
 
     return i, best_audio, best_text, start_time, end_time
 
-def process_video(video_path, output_dir, duration_limit=None, input_lang="Tamil", output_lang="English", progress_callback=None):
+def process_video(video_path, output_dir, duration_limit=None, input_lang="Malayalam", output_lang="English", progress_callback=None, target_voice=None, speed=1.0):
     filename = os.path.basename(video_path)
     
     if progress_callback: progress_callback("Preprocessing", 0, "Checking file...")
@@ -822,7 +927,7 @@ def process_video(video_path, output_dir, duration_limit=None, input_lang="Tamil
     with ThreadPoolExecutor(max_workers=5) as executor:
         futures = []
         for i, seg in enumerate(segments):
-            futures.append(executor.submit(process_segment_task, seg, i, len(segments), input_lang, output_lang))
+            futures.append(executor.submit(process_segment_task, seg, i, len(segments), input_lang, output_lang, target_voice, speed))
         
         for future in as_completed(futures):
             try:
@@ -902,6 +1007,135 @@ def process_video(video_path, output_dir, duration_limit=None, input_lang="Tamil
         "target_segments": translated_segments # List of dicts
     }
 
+def regenerate_video(video_path, output_dir, new_segments, old_segments, input_lang="English", output_lang="Hindi", target_voice=None, speed=1.0, progress_callback=None):
+    """
+    Regenerates the dubbing based on updated segments.
+    - If Source Text changed -> Re-run MT + TTS
+    - If Target Text changed (but Source same) -> Re-run TTS (Skip MT)
+    - If Neither changed -> Use Cache (TTS)
+    """
+    filename = os.path.basename(video_path)
+    name_no_ext = os.path.splitext(filename)[0]
+    srt_dir = "SRT"
+    
+    print(f"--- Regenerating Dub for {filename} ---")
+    if progress_callback: progress_callback("Regenerating", 0, "Analyzing changes...")
+
+    processed_results = [None] * len(new_segments)
+    total_segments = len(new_segments)
+    completed_segments = 0
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = []
+        for i, new_seg in enumerate(new_segments):
+            # Find corresponding old segment (assuming index alignment for now)
+            # TODO: Better alignment if segments were added/removed? 
+            # For now, we assume strict 1:1 mapping based on index.
+            old_seg = old_segments[i] if i < len(old_segments) else None
+            
+            source_changed = old_seg and (new_seg['text'] != old_seg['text'])
+            target_changed = old_seg and (new_seg.get('target_text') != old_seg.get('target_text'))
+            
+            forced_target = None
+            
+            if source_changed:
+                print(f"Segment {i}: Source changed. Re-translating...")
+                # forced_target remains None, so MT runs
+            elif target_changed:
+                print(f"Segment {i}: Target changed manually. Skipping MT.")
+                forced_target = new_seg.get('target_text')
+            else:
+                # No change, but we pass forced_target to skip MT and hit TTS cache
+                forced_target = new_seg.get('target_text')
+                
+            # We must construct a 'seg' object that matches what process_segment_task expects
+            # It expects 'text' to be the SOURCE text.
+            task_seg = {
+                "text": new_seg['text'], # Source Text
+                "start": new_seg['start'],
+                "end": new_seg['end'],
+                "speaker": new_seg.get('speaker', 'Speaker 1')
+            }
+            
+            futures.append(executor.submit(
+                process_segment_task, 
+                task_seg, i, total_segments, 
+                input_lang, output_lang, target_voice, speed, 
+                forced_target_text=forced_target
+            ))
+        
+        for future in as_completed(futures):
+            try:
+                i, audio_seg, text, start, end = future.result()
+                processed_results[i] = (audio_seg, text, start, end)
+                
+                completed_segments += 1
+                if progress_callback:
+                    prog = int((completed_segments / total_segments) * 80)
+                    progress_callback("Regenerating", prog, f"Segment {completed_segments}/{total_segments}")
+                    
+            except Exception as e:
+                print(f"Error in regeneration task {i}: {e}")
+
+    print("--- Assembling Audio ---")
+    if progress_callback: progress_callback("Finalizing", 90, "Stitching audio...")
+    
+    combined_audio = AudioSegment.empty()
+    translated_segments = []
+    
+    for i, res in enumerate(processed_results):
+        if not res: continue
+        audio_seg, text, start_time, end_time = res
+        
+        actual_current_time = len(combined_audio)
+        silence_gap = start_time - actual_current_time
+        
+        if silence_gap > 0:
+            combined_audio += AudioSegment.silent(duration=silence_gap)
+            
+        if audio_seg:
+            combined_audio += audio_seg
+        else:
+            target_dur = end_time - start_time
+            combined_audio += AudioSegment.silent(duration=target_dur)
+
+        translated_segments.append({"start": start_time, "end": end_time, "text": text})
+
+    # Save new Target SRT
+    mt_srt_path = os.path.join(srt_dir, f"{name_no_ext}_{output_lang}.srt")
+    with open(mt_srt_path, "w", encoding="utf-8") as f:
+        for i, seg in enumerate(translated_segments):
+            s = datetime.utcfromtimestamp(seg['start']/1000).strftime('%H:%M:%S,%f')[:-3]
+            e = datetime.utcfromtimestamp(seg['end']/1000).strftime('%H:%M:%S,%f')[:-3]
+            f.write(f"{i+1}\n{s} --> {e}\n{seg['text']}\n\n")
+
+    audio_path = os.path.join(output_dir, f"{name_no_ext}_dubbed.wav")
+    combined_audio.export(audio_path, format="wav")
+    
+    output_video_path = os.path.join(output_dir, filename)
+    
+    # Check if audio only
+    is_audio_only = filename.lower().endswith(('.mp3', '.wav', '.aac', '.flac', '.m4a'))
+    final_output_path = ""
+
+    if is_audio_only:
+        final_output_path = audio_path
+    else:
+        print(f"--- Merging into {output_video_path} ---")
+        cmd = ["ffmpeg", "-y", "-i", video_path, "-i", audio_path, "-c:v", "copy", "-c:a", "aac", "-map", "0:v:0", "-map", "1:a:0", "-shortest", "-movflags", "+faststart", output_video_path]
+        subprocess.run(cmd, check=True)
+        final_output_path = output_video_path
+
+    if progress_callback: progress_callback("Completed", 100, "Regeneration done.")
+
+    return {
+        "output_path": final_output_path,
+        "source_srt": open(os.path.join(srt_dir, f"{name_no_ext}_ASR.srt"), "r", encoding="utf-8").read(), # Original Source SRT (or should we update it if source changed? Let's keep original file but return updated segments)
+        "target_srt": open(mt_srt_path, "r", encoding="utf-8").read(),
+        "source_segments": new_segments, # Return the NEW source segments as the current state
+        "target_segments": translated_segments
+    }
+
 # === RUN ===
 if __name__ == "__main__":
     input_dir = "Videos/test"
@@ -917,7 +1151,7 @@ if __name__ == "__main__":
     else:
         for filename in video_files:
             full_path = os.path.join(input_dir, filename)
-            process_video(full_path, output_dir, duration_limit=None, input_lang="Tamil", output_lang="English")
+            process_video(full_path, output_dir, duration_limit=120, input_lang="English", output_lang="Hindi", target_voice="Male (Chirp 3 - Alnilam)", speed=0.85)
     
     metrics.save_report()
     print("Metrics saved to metrics.json")

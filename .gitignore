@@ -19,6 +19,8 @@ __pycache__/
 Backend/Video out/
 Backend/Videos/uploads/
 Backend/SRT/
+SRT/
+Video out/
 
 # Logs
 *.log

@@ -1,0 +1,20 @@
+fastapi
+uvicorn
+python-multipart
+python-dotenv
+google-genai
+pydub
+requests
+ffmpeg-python
+# Standard ML/DL Libraries
+torch
+torchvision
+torchaudio
+tensorflow
+transformers
+scikit-learn
+pandas
+numpy
+opencv-python
+matplotlib
+jupyter

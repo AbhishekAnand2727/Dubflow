@@ -1,17 +1,16 @@
+
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import {
-  Upload, Wand2, CheckCircle, Play, Download,
-  FileAudio, FileVideo, RefreshCw, AlertCircle,
-  Mic, Languages, Activity, Edit3, ArrowLeft
+  Upload, FileVideo, Languages, Wand2, CheckCircle2, AlertCircle, Loader2, Play, Pause, Volume2, Activity, ArrowLeft, Mic, Clock, FileAudio, RefreshCw, Download
 } from 'lucide-react';
 
-const SERVER_URL = "http://localhost:8001";
+const SERVER_URL = "http://127.0.0.1:8002";
 const API_BASE = `${SERVER_URL}/api`;
 
 const LANGUAGES = [
   "English", "Hindi", "Assamese", "Punjabi", "Telugu",
-  "Tamil", "Marathi", "Gujarati", "Kannada", "Malayalam", "Odia"
+  "Tamil", "Marathi", "Gujarati", "Kannada", "Malayalam", "Odia", "Bengali"
 ];
 
 function App() {
@@ -26,7 +25,8 @@ function App() {
     inputLang: 'English',
     outputLang: 'Hindi',
     voice: 'Female',
-    speed: 1.0
+    speed: 1.0,
+    durationLimit: null
   });
   const [taskId, setTaskId] = useState(null);
   const [pipelineStatus, setPipelineStatus] = useState({
@@ -82,7 +82,8 @@ function App() {
         input_lang: settings.inputLang,
         output_lang: settings.outputLang,
         target_voice: settings.voice,
-        speed: settings.speed
+        speed: settings.speed,
+        duration_limit: settings.durationLimit
       });
 
       setTaskId(dubRes.data.task_id);
@@ -339,6 +340,21 @@ function App() {
             >
               <option value="Female">Female (Neural)</option>
               <option value="Male">Male (Neural)</option>
+              <optgroup label="Chirp 3 (HD) - Female">
+                <option value="Female (Chirp 3 - Aoede)">Aoede</option>
+                <option value="Female (Chirp 3 - Kore)">Kore</option>
+                <option value="Female (Chirp 3 - Leda)">Leda</option>
+                <option value="Female (Chirp 3 - Zephyr)">Zephyr</option>
+                <option value="Female (Chirp 3 - Erinome)">Erinome</option>
+              </optgroup>
+              <optgroup label="Chirp 3 (HD) - Male">
+                <option value="Male (Chirp 3 - Puck)">Puck</option>
+                <option value="Male (Chirp 3 - Charon)">Charon</option>
+                <option value="Male (Chirp 3 - Fenrir)">Fenrir</option>
+                <option value="Male (Chirp 3 - Orus)">Orus</option>
+                <option value="Male (Chirp 3 - Achird)">Achird</option>
+                <option value="Male (Chirp 3 - Alnilam)">Alnilam</option>
+              </optgroup>
             </select>
           </div>
 
@@ -352,6 +368,19 @@ function App() {
               className="w-full accent-orange-600 h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer"
               value={settings.speed}
               onChange={(e) => setSettings({ ...settings, speed: parseFloat(e.target.value) })}
+            />
+          </div>
+
+          <div className="space-y-2">
+            <label className="text-sm font-bold text-slate-700 flex items-center gap-2">
+              <Clock size={16} className="text-orange-500" /> Duration Limit (Sec)
+            </label>
+            <input
+              type="number"
+              placeholder="Full Video (Default)"
+              className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-orange-500 outline-none transition-all font-medium text-slate-700"
+              value={settings.durationLimit || ''}
+              onChange={(e) => setSettings({ ...settings, durationLimit: e.target.value ? parseInt(e.target.value) : null })}
             />
           </div>
         </div>
@@ -412,9 +441,10 @@ function App() {
     </div>
   );
 
-  const TranscriptViewer = ({ sourceSegments, targetSegments, currentTime }) => {
+  const TranscriptViewer = ({ sourceSegments, targetSegments, currentTime, onUpdate }) => {
     const containerRef = useRef(null);
     const activeRef = useRef(null);
+    const [edits, setEdits] = useState({ source: {}, target: {} });
 
     useEffect(() => {
       if (activeRef.current && containerRef.current) {
@@ -425,12 +455,23 @@ function App() {
       }
     }, [currentTime]);
 
+    const handleEdit = (type, index, value) => {
+      setEdits(prev => ({
+        ...prev,
+        [type]: { ...prev[type], [index]: value }
+      }));
+      onUpdate(type, index, value);
+    };
+
     return (
       <div ref={containerRef} className="flex-1 overflow-y-auto p-6 space-y-6 scroll-smooth">
         {sourceSegments.map((seg, i) => {
           const start = parseTime(seg.start);
           const end = parseTime(seg.end);
           const isActive = currentTime >= start && currentTime <= end;
+
+          const sourceText = edits.source[i] !== undefined ? edits.source[i] : seg.text;
+          const targetText = edits.target[i] !== undefined ? edits.target[i] : (targetSegments[i]?.text || "");
 
           return (
             <div
@@ -444,14 +485,21 @@ function App() {
               `}
             >
               <div className="space-y-2">
-                <p className={`text-lg font-medium leading-relaxed ${isActive ? 'text-slate-900' : 'text-slate-500'}`}>
-                  {seg.text}
-                </p>
+                <textarea
+                  className={`w-full bg-transparent border-none resize-none focus:ring-0 p-0 text-lg font-medium leading-relaxed ${isActive ? 'text-slate-900' : 'text-slate-500'}`}
+                  value={sourceText}
+                  onChange={(e) => handleEdit('source', i, e.target.value)}
+                  rows={Math.max(2, Math.ceil(sourceText.length / 40))}
+                />
               </div>
               <div className="space-y-2">
-                <p className={`text-lg font-medium leading-relaxed ${isActive ? 'text-orange-700' : 'text-slate-400'}`}>
-                  {targetSegments[i]?.text}
-                </p>
+                <textarea
+                  className={`w-full bg-transparent border-none resize-none focus:ring-0 p-0 text-lg font-medium leading-relaxed ${isActive ? 'text-orange-700' : 'text-slate-400'}`}
+                  value={targetText}
+                  onChange={(e) => handleEdit('target', i, e.target.value)}
+                  rows={Math.max(2, Math.ceil(targetText.length / 40))}
+                  dir="auto"
+                />
               </div>
             </div>
           );
@@ -472,6 +520,53 @@ function App() {
   const PlayerState = () => {
     const [currentTime, setCurrentTime] = useState(0);
     const videoRef = useRef(null);
+    const [localTranscripts, setLocalTranscripts] = useState(transcripts);
+    const [isRegenerating, setIsRegenerating] = useState(false);
+
+    // Sync local transcripts when global transcripts change (e.g. after regeneration)
+    useEffect(() => {
+      setLocalTranscripts(transcripts);
+    }, [transcripts]);
+
+    const handleTranscriptUpdate = (type, index, value) => {
+      const newTranscripts = { ...localTranscripts };
+      if (type === 'source') {
+        newTranscripts.source[index] = { ...newTranscripts.source[index], text: value };
+      } else {
+        newTranscripts.target[index] = { ...newTranscripts.target[index], text: value };
+      }
+      setLocalTranscripts(newTranscripts);
+    };
+
+    const handleRegenerate = async () => {
+      if (!activeTask) return;
+      setIsRegenerating(true);
+      try {
+        // Construct segments payload
+        // We need to send list of {start, end, text (source), target_text}
+        const segmentsPayload = localTranscripts.source.map((srcSeg, i) => ({
+          start: srcSeg.start,
+          end: srcSeg.end,
+          text: srcSeg.text,
+          target_text: localTranscripts.target[i]?.text || ""
+        }));
+
+        await axios.post(`${API_BASE}/regenerate`, {
+          task_id: activeTask.id,
+          segments: segmentsPayload
+        });
+
+        // Start polling again
+        setTaskId(activeTask.id);
+        setState('processing');
+        setView('new'); // Switch to processing view
+
+      } catch (err) {
+        console.error("Regeneration failed", err);
+        alert("Failed to start regeneration");
+        setIsRegenerating(false);
+      }
+    };
 
     return (
       <div className="max-w-7xl mx-auto mt-6 px-6 animate-in fade-in slide-in-from-bottom-8 duration-700 pb-10 h-[calc(100vh-100px)] flex flex-col">
@@ -498,13 +593,24 @@ function App() {
             </div>
           </div>
 
-          <a
-            href={`${API_BASE}${result.download_url}`}
-            download
-            className="px-4 py-2 rounded-xl font-bold text-white bg-orange-600 hover:bg-orange-700 transition-colors shadow-lg shadow-orange-500/20 flex items-center gap-2 text-sm"
-          >
-            <Download size={18} /> Download
-          </a>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={handleRegenerate}
+              disabled={isRegenerating}
+              className="px-4 py-2 rounded-xl font-bold text-white bg-slate-900 hover:bg-slate-800 transition-colors shadow-lg shadow-slate-900/20 flex items-center gap-2 text-sm"
+            >
+              {isRegenerating ? <Loader2 size={18} className="animate-spin" /> : <RefreshCw size={18} />}
+              Update Dub
+            </button>
+
+            <a
+              href={`${API_BASE}${result.download_url}`}
+              download
+              className="px-4 py-2 rounded-xl font-bold text-white bg-orange-600 hover:bg-orange-700 transition-colors shadow-lg shadow-orange-500/20 flex items-center gap-2 text-sm"
+            >
+              <Download size={18} /> Download
+            </a>
+          </div>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 flex-1 min-h-0">
@@ -547,9 +653,10 @@ function App() {
             <div className="absolute top-0 left-0 right-0 h-12 bg-gradient-to-b from-white/90 to-transparent z-10 pointer-events-none" />
 
             <TranscriptViewer
-              sourceSegments={transcripts.source}
-              targetSegments={transcripts.target}
+              sourceSegments={localTranscripts.source}
+              targetSegments={localTranscripts.target}
               currentTime={currentTime}
+              onUpdate={handleTranscriptUpdate}
             />
 
             <div className="absolute bottom-0 left-0 right-0 h-12 bg-gradient-to-t from-white/90 to-transparent z-10 pointer-events-none" />
