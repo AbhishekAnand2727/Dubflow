@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import {
-  Upload, FileVideo, Languages, Wand2, CheckCircle2, AlertCircle, Loader2, Play, Pause, Volume2, Activity, ArrowLeft, Mic, Clock, FileAudio, RefreshCw, Download
+  Upload, FileVideo, Languages, Wand2, CheckCircle2, AlertCircle, Loader2, Play, Pause, Volume2, Activity, ArrowLeft, Mic, Clock, FileAudio, RefreshCw, Download, Trash2
 } from 'lucide-react';
 
 const SERVER_URL = "http://127.0.0.1:8002";
@@ -203,12 +203,22 @@ function App() {
             <div
               key={task.id}
               onClick={() => loadTask(task.id)}
-              className="bg-white/80 backdrop-blur-md p-5 rounded-2xl shadow-sm border border-orange-100 hover:shadow-xl hover:shadow-orange-500/10 hover:border-orange-200 transition-all cursor-pointer group"
+              className="bg-white/80 backdrop-blur-md p-5 rounded-2xl shadow-sm border border-orange-100 hover:shadow-xl hover:shadow-orange-500/10 hover:border-orange-200 transition-all cursor-pointer group relative"
             >
               <div className="aspect-video bg-slate-900 rounded-xl mb-4 relative overflow-hidden">
                 <div className="absolute inset-0 flex items-center justify-center group-hover:scale-110 transition-transform duration-500">
                   <Play size={32} className="text-white/80" />
                 </div>
+
+                {/* Delete Button */}
+                <button
+                  onClick={(e) => handleDelete(e, task.id)}
+                  className="absolute top-2 right-2 p-2 bg-black/40 hover:bg-red-500 backdrop-blur-md rounded-lg text-white/90 hover:text-white transition-all opacity-0 group-hover:opacity-100 z-10"
+                  title="Delete Video"
+                >
+                  <Trash2 size={16} />
+                </button>
+
                 <div className="absolute bottom-2 right-2 px-2 py-1 bg-black/60 backdrop-blur-md rounded-lg text-xs font-bold text-white">
                   {task.output_lang}
                 </div>
@@ -228,6 +238,25 @@ function App() {
       )}
     </div>
   );
+
+  const handleDelete = async (e, id) => {
+    e.stopPropagation();
+    if (!window.confirm("Are you sure you want to delete this dub? This action cannot be undone.")) return;
+
+    try {
+      await axios.delete(`${API_BASE}/delete/${id}`);
+      setHistory(prev => prev.filter(t => t.id !== id));
+
+      // If we deleted the currently active task (unlikely from Home view, but possible if flow changes)
+      if (activeTask && activeTask.id === id) {
+        setResult(null);
+        setActiveTask(null);
+      }
+    } catch (err) {
+      console.error("Delete failed", err);
+      // alert("Failed to delete task"); // user might cancel or network error
+    }
+  };
 
   const loadTask = async (id) => {
     try {
@@ -569,7 +598,7 @@ function App() {
     };
 
     return (
-      <div className="max-w-7xl mx-auto mt-6 px-6 animate-in fade-in slide-in-from-bottom-8 duration-700 pb-10 h-[calc(100vh-100px)] flex flex-col">
+      <div className="max-w-[95vw] mx-auto mt-6 px-6 animate-in fade-in slide-in-from-bottom-8 duration-700 pb-10 h-[calc(100vh-100px)] flex flex-col">
         {/* Toolbar */}
         <div className="flex items-center justify-between mb-6 bg-white/80 backdrop-blur-md p-4 rounded-2xl shadow-sm border border-white/50">
           <div className="flex items-center gap-4">
@@ -613,9 +642,9 @@ function App() {
           </div>
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 flex-1 min-h-0">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 flex-1 min-h-0">
           {/* Video Player */}
-          <div className="lg:col-span-2 flex flex-col gap-4">
+          <div className="lg:col-span-1 flex flex-col gap-4">
             <div className="bg-black rounded-3xl overflow-hidden shadow-2xl aspect-video relative ring-4 ring-white/50 flex-shrink-0">
               <video
                 ref={videoRef}

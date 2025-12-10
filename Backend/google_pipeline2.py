@@ -787,7 +787,7 @@ def parse_srt(srt_content):
             seg['speaker'] = 'Speaker 1'
     return segments
 
-def process_segment_task(seg, i, total, input_lang, output_lang, target_voice=None, speed=1.0, forced_target_text=None):
+def process_segment_task(seg, i, total, input_lang, output_lang, target_voice=None, speed=1.0, forced_target_text=None, status_reporter=None):
     """Processes a single segment. If forced_target_text is provided, skips MT and text adaptation."""
     source_text = seg['text']
     start_time = seg['start']
@@ -797,6 +797,7 @@ def process_segment_task(seg, i, total, input_lang, output_lang, target_voice=No
     target_duration_sec = target_duration_ms / 1000.0
     
     print(f"[{i+1}/{total}] [{speaker}] {target_duration_sec:.2f}s | {source_text[:30]}...")
+    if status_reporter: status_reporter(f"Seg {i+1}: Analyzing...")
     
     if "[SILENCE]" in source_text.upper() or "[NOISE" in source_text.upper():
         return i, AudioSegment.silent(duration=target_duration_ms), source_text, start_time, end_time
@@ -828,6 +829,7 @@ def process_segment_task(seg, i, total, input_lang, output_lang, target_voice=No
             if diff_ms > 500: # If > 0.5s longer
                 gap = diff_ms / 1000.0
                 print(f"  -> Too long by {gap:.2f}s. Attempting to SUMMARIZE...")
+                if status_reporter: status_reporter(f"Seg {i+1}: Summarizing (Too long by {gap:.2f}s)...")
                 current_translated_text = translate_adaptive(source_text, target_duration_sec, input_lang, output_lang, feedback="summarize", time_diff=gap)
                 audio_bytes_v2 = generate_google_tts(current_translated_text, get_api_key(), voice_name=voice_name, speaking_rate=speed)
                 if audio_bytes_v2:
@@ -843,6 +845,7 @@ def process_segment_task(seg, i, total, input_lang, output_lang, target_voice=No
             elif diff_ms < -500: # If > 0.5s shorter
                 gap = abs(diff_ms) / 1000.0
                 print(f"  -> Too short by {gap:.2f}s. Attempting to ELABORATE...")
+                if status_reporter: status_reporter(f"Seg {i+1}: Elaborating (Too short by {gap:.2f}s)...")
                 current_translated_text = translate_adaptive(source_text, target_duration_sec, input_lang, output_lang, feedback="elaborate", time_diff=gap)
                 audio_bytes_v2 = generate_google_tts(current_translated_text, get_api_key(), voice_name=voice_name, speaking_rate=speed)
                 if audio_bytes_v2:
@@ -860,6 +863,7 @@ def process_segment_task(seg, i, total, input_lang, output_lang, target_voice=No
             if speed_factor > 1.02: # Only if > 2% diff
                 eff_speed = min(speed_factor, 1.15) # Cap at 1.15x
                 print(f"  -> Adjusting speed by {eff_speed:.2f}x (Required: {speed_factor:.2f}x)")
+                if status_reporter: status_reporter(f"Seg {i+1}: Syncing speed ({eff_speed:.2f}x)...")
                 
                 if speed_factor > 1.15:
                     print(f"  -> WARNING: Audio too long! Desync of {(len(audio)/1.15 - target_duration_ms)/1000:.2f}s remaining.")
@@ -927,7 +931,11 @@ def process_video(video_path, output_dir, duration_limit=None, input_lang="Malay
     with ThreadPoolExecutor(max_workers=5) as executor:
         futures = []
         for i, seg in enumerate(segments):
-            futures.append(executor.submit(process_segment_task, seg, i, len(segments), input_lang, output_lang, target_voice, speed))
+            # Define reporter for this segment and task
+            def mk_reporter(pg_idx, pg_total):
+                return lambda msg: progress_callback("Translating & Dubbing", 40 + int((pg_idx/pg_total)*40), msg) if progress_callback else None
+            
+            futures.append(executor.submit(process_segment_task, seg, i, len(segments), input_lang, output_lang, target_voice, speed, forced_target_text=None, status_reporter=mk_reporter(i, len(segments))))
         
         for future in as_completed(futures):
             try:
@@ -1007,7 +1015,7 @@ def process_video(video_path, output_dir, duration_limit=None, input_lang="Malay
         "target_segments": translated_segments # List of dicts
     }
 
-def regenerate_video(video_path, output_dir, new_segments, old_segments, input_lang="English", output_lang="Hindi", target_voice=None, speed=1.0, progress_callback=None):
+def regenerate_video(video_path, output_dir, new_segments, old_segments, input_lang="English", output_lang="Hindi", target_voice=None, speed=1.0, output_filename_override=None, progress_callback=None):
     """
     Regenerates the dubbing based on updated segments.
     - If Source Text changed -> Re-run MT + TTS
@@ -1061,7 +1069,8 @@ def regenerate_video(video_path, output_dir, new_segments, old_segments, input_l
                 process_segment_task, 
                 task_seg, i, total_segments, 
                 input_lang, output_lang, target_voice, speed, 
-                forced_target_text=forced_target
+                forced_target_text=forced_target,
+                status_reporter=lambda msg, idx=i, tot=total_segments: progress_callback("Regenerating", int((idx/tot)*80), msg) if progress_callback else None
             ))
         
         for future in as_completed(futures):
@@ -1113,6 +1122,8 @@ def regenerate_video(video_path, output_dir, new_segments, old_segments, input_l
     combined_audio.export(audio_path, format="wav")
     
     output_video_path = os.path.join(output_dir, filename)
+    if output_filename_override:
+        output_video_path = os.path.join(output_dir, output_filename_override)
     
     # Check if audio only
     is_audio_only = filename.lower().endswith(('.mp3', '.wav', '.aac', '.flac', '.m4a'))

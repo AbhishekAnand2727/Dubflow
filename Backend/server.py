@@ -2,6 +2,7 @@ import os
 import shutil
 import uuid
 import threading
+from datetime import datetime
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -256,6 +257,8 @@ async def start_dubbing(request: DubRequest, background_tasks: BackgroundTasks):
         "filename": request.filename, # Store filename for display
         "input_lang": request.input_lang,
         "output_lang": request.output_lang,
+        "target_voice": request.target_voice,
+        "speed": request.speed,
         "status": "pending",
         "progress": 0,
         "step": "Queued",
@@ -332,6 +335,13 @@ async def regenerate_dub(request: RegenerateRequest, background_tasks: Backgroun
             
             input_path = os.path.join(UPLOAD_DIR, input_filename)
             
+            # Versioning Output File to avoid locks
+            timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+            base_name, ext = os.path.splitext(original_task["filename"])
+            # Keep original base but append version (or just use task ID and version)
+            # Simplest: Input Name + _v_{timestamp}
+            versioned_filename = f"{base_name}_v_{timestamp_str}{ext}"
+            
             new_result = google_pipeline2.regenerate_video(
                 video_path=input_path,
                 output_dir=OUTPUT_DIR,
@@ -339,11 +349,9 @@ async def regenerate_dub(request: RegenerateRequest, background_tasks: Backgroun
                 old_segments=rich_old_segments,
                 input_lang=original_task["input_lang"],
                 output_lang=original_task["output_lang"],
-                target_voice=None, # Reuse default or we need to store voice in task? 
-                # We didn't store voice in task root, but we can assume default or add it to task model.
-                # For now, let's assume default or pass None (random/consistent).
-                # Ideally we should store 'settings' in task.
-                speed=1.0, # Same issue, need to store speed.
+                target_voice=original_task.get("target_voice"), 
+                speed=original_task.get("speed", 1.0),
+                output_filename_override=versioned_filename,
                 progress_callback=lambda s, p, m: update_task_progress(task_id, s, p, m)
             )
             
@@ -435,6 +443,50 @@ async def download_file(filename: str):
         filename=filename,
         headers={"Content-Disposition": f"attachment; filename={filename}"} if "download" in filename else None
     )
+
+@app.delete("/api/delete/{task_id}")
+async def delete_task(task_id: str):
+    if task_id not in tasks:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    task = tasks[task_id]
+    print(f"Deleting task {task_id}...")
+    
+    # Helper to safely delete
+    def safe_remove(path):
+        if path and os.path.exists(path):
+            try:
+                os.remove(path)
+                print(f"Deleted: {path}")
+            except Exception as e:
+                print(f"Error deleting {path}: {e}")
+
+    # 1. Delete Output Video
+    if task.get("result"):
+        safe_remove(task["result"].get("output_path"))
+        
+    # 2. Delete Uploaded Input File (optional, but good for cleanup if valid)
+    # We stored 'filename' in task, which refers to the uploaded file name in UPLOAD_DIR
+    input_filename = task.get("filename")
+    if input_filename:
+        # Check if it was a generated UUID filename or original. 
+        # Our upload logic: new_filename = f"{file_id}{extension}"
+        # We might want to be careful not to delete shared files if that was a thing, but here it's 1-1.
+        input_path = os.path.join(UPLOAD_DIR, input_filename)
+        safe_remove(input_path)
+
+    # 3. Delete related SRTs
+    # Iterate SRT dir and delete any file starting with task_id
+    if os.path.exists(SRT_DIR):
+        for f in os.listdir(SRT_DIR):
+            if f.startswith(task_id):
+                safe_remove(os.path.join(SRT_DIR, f))
+
+    # 4. Remove from memory and save
+    del tasks[task_id]
+    save_history()
+    
+    return {"status": "deleted", "id": task_id}
 
 @app.get("/api/languages")
 async def get_languages():
