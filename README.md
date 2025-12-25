@@ -104,9 +104,9 @@ This is the most complex component. It doesn't just translate; it **fits** the t
 - **Status:** Real-time progress updates.
 - **Download:** Get final video or SRTs.
 
-### Advanced Video Player \u0026 Expert Review Interface
+### Advanced Video Player & Expert Review Interface
 
-![DubFlow Video Player](image%20copy.png)
+![DubFlow Video Player](image_copy.png)
 
 The video player window provides a professional-grade interface for language experts to review and refine dubbing quality:
 
