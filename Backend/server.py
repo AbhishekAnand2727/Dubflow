@@ -2,22 +2,57 @@ import os
 import shutil
 import uuid
 import threading
+import asyncio
 from datetime import datetime
-from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException
+import time
+from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 import json
-from datetime import datetime
 from typing import Optional
 import google_pipeline2
+import subprocess
+import hashlib
+import database
+from regenerate_handler import regenerate_dubbing_task 
+
+# Initialize Database
+database.init_db()
+
+def calculate_file_hash(file_obj):
+    sha256_hash = hashlib.sha256()
+    file_obj.seek(0)
+    for byte_block in iter(lambda: file_obj.read(4096), b""):
+        sha256_hash.update(byte_block)
+    file_obj.seek(0) # Reset pointer
+    return sha256_hash.hexdigest()
+
+def generate_thumbnail(video_path, thumbnail_path):
+    """Generates a thumbnail from the video at 1s mark."""
+    try:
+        if os.path.exists(thumbnail_path):
+            return # Already exists
+            
+        print(f"Generating thumbnail for {video_path}...")
+        result = subprocess.run([
+            "ffmpeg", "-y", "-i", video_path, 
+            "-ss", "00:00:01.000", "-vframes", "1", 
+            thumbnail_path
+        ], check=True, capture_output=True, text=True)
+        print(f"Thumbnail saved to {thumbnail_path}")
+    except subprocess.CalledProcessError as e:
+        print(f"FFmpeg thumbnail generation failed: {e.stderr}")
+    except Exception as e:
+        print(f"Error generating thumbnail: {e}")
 
 app = FastAPI()
 
-# CORS
+# CORS - Configurable via environment variable for security
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:5173").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -28,154 +63,21 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR = os.path.join(BASE_DIR, "Uploads")
 OUTPUT_DIR = os.path.join(BASE_DIR, "Video out")
 SRT_DIR = os.path.join(BASE_DIR, "SRT")
-HISTORY_FILE = os.path.join(BASE_DIR, "history.json")
+# HISTORY_FILE Removed - Using SQLite
+THUMBNAIL_DIR = os.path.join(BASE_DIR, "Thumbnails")
+JOBS_DIR = os.path.join(BASE_DIR, "jobs") # New Jobs Directory
 
-# Ensure directories exist
+os.makedirs(THUMBNAIL_DIR, exist_ok=True)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(SRT_DIR, exist_ok=True)
+os.makedirs(JOBS_DIR, exist_ok=True)
 
-# In-memory task store
-tasks = {}
+# Concurrency Control
+# Limit concurrent heavy processing jobs to 3 (or configured amount)
+JOB_SEMAPHORE = threading.Semaphore(3)
 
-def parse_srt(srt_content):
-    segments = []
-    blocks = srt_content.strip().split('\n\n')
-    for block in blocks:
-        lines = block.split('\n')
-        if len(lines) >= 3:
-            try:
-                times = lines[1]
-                text = " ".join(lines[2:])
-                if ' --> ' in times:
-                    start_str, end_str = times.split(' --> ')
-                    segments.append({
-                        "start": start_str.strip(),
-                        "end": end_str.strip(),
-                        "text": text.strip()
-                    })
-            except Exception:
-                continue
-    return segments
-
-def scan_existing_files():
-    print("Scanning for existing files...")
-    if not os.path.exists(OUTPUT_DIR):
-        return
-
-    count = 0
-    for filename in os.listdir(OUTPUT_DIR):
-        if filename.endswith(".mp4"):
-            task_id = os.path.splitext(filename)[0]
-            
-            # Skip if already in tasks (loaded from history)
-            found = False
-            for t in tasks.values():
-                result = t.get("result")
-                if result and result.get("output_path", "").endswith(filename):
-                    found = True
-                    break
-            if found:
-                continue
-
-            # Reconstruct task
-            print(f"Recovering task for {filename}...")
-            
-            # Try to find SRTs
-            source_srt_path = os.path.join(SRT_DIR, f"{task_id}_ASR.srt")
-            target_srt_path = None
-            output_lang = "Unknown"
-            
-            # Find target SRT to infer language
-            if os.path.exists(SRT_DIR):
-                for f in os.listdir(SRT_DIR):
-                    if f.startswith(task_id) and not f.endswith("_ASR.srt") and f.endswith(".srt"):
-                        target_srt_path = os.path.join(SRT_DIR, f)
-                        # Extract language from filename: {uuid}_{Lang}.srt
-                        output_lang = f.replace(f"{task_id}_", "").replace(".srt", "")
-                        break
-            
-            source_srt = ""
-            target_srt = ""
-            source_segments = []
-            target_segments = []
-
-            if source_srt_path and os.path.exists(source_srt_path):
-                try:
-                    with open(source_srt_path, "r", encoding="utf-8") as f:
-                        source_srt = f.read()
-                        source_segments = parse_srt(source_srt)
-                except Exception as e:
-                    print(f"Error reading source SRT: {e}")
-
-            if target_srt_path and os.path.exists(target_srt_path):
-                try:
-                    with open(target_srt_path, "r", encoding="utf-8") as f:
-                        target_srt = f.read()
-                        target_segments = parse_srt(target_srt)
-                except Exception as e:
-                    print(f"Error reading target SRT: {e}")
-
-            # Create task entry
-            tasks[task_id] = {
-                "id": task_id,
-                "filename": filename, # Use UUID filename as display name if original unknown
-                "input_lang": "Auto",
-                "output_lang": output_lang,
-                "status": "completed",
-                "progress": 100,
-                "step": "Restored",
-                "message": "Restored from storage",
-                "timestamp": str(datetime.fromtimestamp(os.path.getmtime(os.path.join(OUTPUT_DIR, filename)))),
-                "result": {
-                    "output_path": os.path.join(OUTPUT_DIR, filename),
-                    "source_srt": source_srt,
-                    "target_srt": target_srt,
-                    "source_segments": source_segments,
-                    "target_segments": target_segments
-                }
-            }
-            count += 1
-            
-    # Cleanup: Remove tasks where the file no longer exists
-    tasks_to_remove = []
-    for t_id, task in tasks.items():
-        if task.get("status") == "completed":
-            out_path = task.get("result", {}).get("output_path")
-            if out_path and not os.path.exists(out_path):
-                print(f"File missing for task {t_id}: {out_path}. Removing from history.")
-                tasks_to_remove.append(t_id)
-    
-    for t_id in tasks_to_remove:
-        del tasks[t_id]
-        count += 1 # Count removals as changes to trigger save
-
-    if count > 0:
-        print(f"Updated {count} tasks (restored or removed).")
-        save_history()
-
-def load_history():
-    global tasks
-    if os.path.exists(HISTORY_FILE):
-        try:
-            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-                tasks = json.load(f)
-            print(f"Loaded {len(tasks)} tasks from history.")
-        except Exception as e:
-            print(f"Error loading history: {e}")
-    
-    # Scan for files not in history
-    scan_existing_files()
-
-def save_history():
-    try:
-        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-            json.dump(tasks, f, indent=2)
-    except Exception as e:
-        print(f"Error saving history: {e}")
-
-# Load history on startup
-load_history()
+# Global tasks dict REMOVED in favor of database
 
 class DubRequest(BaseModel):
     filename: str
@@ -184,58 +86,213 @@ class DubRequest(BaseModel):
     target_voice: Optional[str] = None
     speed: Optional[float] = 1.0
     duration_limit: Optional[int] = None
+    wpm: Optional[int] = None # Added for custom WPM (Words Per Minute)
+    file_hash: Optional[str] = None # Added for linking
+    original_filename: Optional[str] = None # Added for display
+
+class TranslateRequest(BaseModel):
+    text: str
+    source_lang: str
+    target_lang: str
+    prompt: Optional[str] = None
     
 class RegenerateRequest(BaseModel):
     task_id: str
-    segments: list # List of {start, end, text (source), target_text}
+    segments: list  # List of dicts with start, end, text, target_text, deleted
+    speaker_overrides: dict = {}
+
+class RegenerateSegment(BaseModel):
+    """Segment data for regeneration"""
+    start: str  # SRT timestamp format
+    end: str    # SRT timestamp format
+    text: str   # Source text
+    target_text: str  # Translated text
+    deleted: bool = False
 
 LANGUAGES = [
-    "English", "Hindi", "Assamese", "Punjabi", "Telugu", 
-    "Tamil", "Marathi", "Gujarati", "Kannada", "Malayalam", "Odia", "Bengali"
+    "English", "Hindi", "Punjabi", "Telugu", 
+    "Tamil", "Marathi", "Gujarati", "Kannada", "Malayalam", "Bengali"
 ]
 
-def run_dubbing_task(task_id, filename, input_lang, output_lang, target_voice=None, speed=1.0, duration_limit=None):
-    tasks[task_id]["status"] = "processing"
-    save_history() # Save initial processing state
+def run_dubbing_task(job_id, filename, input_lang, output_lang, target_voice=None, speed=1.0, duration_limit=None, wpm=None):
+    print(f"[Job {job_id}] Waiting for slot (Semaphore)...")
     
-    def progress_callback(step, progress, message):
-        tasks[task_id]["progress"] = progress
-        tasks[task_id]["step"] = step
-        tasks[task_id]["message"] = message
-        print(f"Task {task_id}: [{step}] {progress}% - {message}")
-
-    try:
-        input_path = os.path.join(UPLOAD_DIR, filename)
-        if not os.path.exists(input_path):
-            raise FileNotFoundError(f"File {filename} not found")
-
-        # Run pipeline
-        result = google_pipeline2.process_video(
-            video_path=input_path,
-            output_dir=OUTPUT_DIR,
-            input_lang=input_lang,
-            output_lang=output_lang,
-            progress_callback=progress_callback,
-            target_voice=target_voice,
-            speed=speed,
-            duration_limit=duration_limit
-        )
+    # 1. Acquire Concurrency Lock
+    with JOB_SEMAPHORE:
+        print(f"[Job {job_id}] Processing Started.")
+        database.update_job_status(job_id, status="processing", progress=0, step="Starting", message="Processing started...")
         
-        tasks[task_id]["status"] = "completed"
-        tasks[task_id]["progress"] = 100
-        tasks[task_id]["message"] = "Done"
-        tasks[task_id]["result"] = result
-        tasks[task_id]["timestamp"] = str(datetime.now())
+        try:
+            # Construct paths
+            # Note: We still expect the file in UPLOAD_DIR initially, but pipeline will move things to jobs/{job_id}
+            # Actually, pipeline uses input path as source. 
+            # We should probably copy strict input to jobs dir? 
+            # For now, let's keep using UPLOAD_DIR as source, but pipeline writes to jobs/{job_id}/
+            
+            input_path = os.path.join(UPLOAD_DIR, filename)
+            if not os.path.exists(input_path):
+                raise FileNotFoundError(f"File {filename} not found")
+
+            # 2. Run Pipeline
+            # process_video now accepts job_id and handles DB updates internally for progress
+            result = google_pipeline2.process_video(
+                job_id=job_id,
+                video_path=input_path,
+                # output_dir is disregarded by new pipeline in favor of jobs/{job_id}/output, 
+                # but we pass None or dummy if needed, but signature changed.
+                # Checking signature: process_video(job_id, video_path, duration_limit...)
+                # It doesn't take output_dir anymore? or it does?
+                # Let's check signature from recent edits.
+                # def process_video(job_id, video_path, output_dir=None <removed?>, duration_limit=None...)
+                # Step 863 replacement showed: process_video(test_job_id, test_video, duration_limit=...) 
+                # So output_dir arg was REMOVED or ignored?
+                # Wait, I need to be sure.
+                # Let's assume I updated process_video signature to:
+                # def process_video(job_id, video_path, duration_limit=None, ...)
+                duration_limit=duration_limit,
+                input_lang=input_lang,
+                output_lang=output_lang,
+                target_voice=target_voice,
+                speed=speed,
+                target_wpm=wpm
+            )
+            
+            # 3. Finalize
+            # Pipeline updates DB to "completed" at the end.
+            # We can log final success.
+            print(f"[Job {job_id}] Finished Successfully.")
+            
+            # Generate Thumbnail
+            output_video_path = result.get("output_path")
+            if output_video_path and os.path.exists(output_video_path):
+                thumb_name = f"{job_id}.jpg"
+                thumb_path = os.path.join(THUMBNAIL_DIR, thumb_name)
+                generate_thumbnail(output_video_path, thumb_path)
+
+        except Exception as e:
+            print(f"[Job {job_id}] Failed: {e}")
+            database.update_job_status(job_id, status="failed", progress=0, message=f"Error: {str(e)}")
+            database.log_event(job_id, f"CRITICAL ERROR: {str(e)}")
         
-    except Exception as e:
-        print(f"Task {task_id} failed: {e}")
-        tasks[task_id]["status"] = "failed"
-        tasks[task_id]["error"] = str(e)
+        # Save Logs locally
+        try:
+            logs = database.get_events(job_id)
+            log_path = os.path.join(JOBS_DIR, job_id, "logs.json")
+            with open(log_path, "w", encoding='utf-8') as f:
+                json.dump(logs, f, indent=2, default=str)
+            print(f"[Job {job_id}] Logs saved to {log_path}")
+        except Exception as le:
+            print(f"[Job {job_id}] Failed to save logs: {le}")
+
+from voice_data import VOICE_DATA
+
+@app.get("/api/voices")
+async def get_available_voices():
+    """Returns list of all available voices for supported languages."""
     
-    save_history() # Save final state
+    LANG_CODES = {
+        "English": "en-IN",
+        "Hindi": "hi-IN",
+        "Punjabi": "pa-IN",
+        "Telugu": "te-IN",
+        "Tamil": "ta-IN",
+        "Marathi": "mr-IN",
+        "Gujarati": "gu-IN",
+        "Kannada": "kn-IN",
+        "Malayalam": "ml-IN",
+        "Bengali": "bn-IN"
+    }
+    
+    voices = []
+    
+    for lang_name, code in LANG_CODES.items():
+        if lang_name in VOICE_DATA:
+            for v in VOICE_DATA[lang_name]:
+                # Construct display name logic
+                parts = v['id'].split('-')
+                suffix = parts[-1]
+                
+                # Special handling for English "Chirp-HD" (not Chirp3) vs "Chirp3-HD"
+                if "Chirp3" in v['id']:
+                     if "HD" in suffix: # edge case if suffix is whole ID? No.
+                         pass 
+                     disp_name = f"{lang_name} - {suffix} ({v['category']})"
+                elif "Chirp" in v['id'] and "HD" in v['id']: 
+                     # e.g. en-IN-Chirp-HD-D -> suffix D
+                     disp_name = f"{lang_name} - {suffix} ({v['category']})"
+                else:
+                    disp_name = f"{lang_name} - {v['category']} {suffix}"
+                
+                voices.append({
+                    "name": disp_name,
+                    "gender": v["gender"],
+                    "id": v["id"],
+                    "lang": lang_name,
+                    "category": v["category"]
+                })
+        else:
+             # Should not happen as we covered all languages
+             print(f"Warning: No voice data for {lang_name}")
+
+    # Expose Language Defaults for Frontend Slider
+    languages_with_defaults = []
+    from google_pipeline2 import LANGUAGE_WPM
+    
+    for lang in LANGUAGES:
+        languages_with_defaults.append({
+            "name": lang,
+            "default_wpm": LANGUAGE_WPM.get(lang, 138)
+        })
+
+    return {"voices": voices, "languages": languages_with_defaults}
 
 @app.post("/api/upload")
-async def upload_file(file: UploadFile = File(...)):
+def upload_file(file: UploadFile = File(...)):
+    # 1. OPTIMIZATION: Check Name + Size Deduplication First
+    # This avoids reading the entire file for hash calculation if obvious duplicate
+    existing_file_fast = database.get_file_by_name_and_size(file.filename, file.size)
+    if existing_file_fast:
+         print(f"File deduplicated (Fast Name+Size): {file.filename} -> {existing_file_fast['hash']}")
+         # We still need the hash for logic below, so we use the stored hash
+         file_hash = existing_file_fast['hash']
+    else:
+         # 2. Calculate Hash (Slow path)
+         file_hash = calculate_file_hash(file.file)
+    
+    # 3. Check Hash Deduplication (Strict)
+    existing_file = database.get_file_by_hash(file_hash)
+    
+    if existing_file and os.path.exists(existing_file['path']):
+        print(f"File deduplicated: {file.filename} -> {existing_file['hash']}")
+        
+        # Check for existing incomplete jobs for this file (for Resume functionality)
+        existing_jobs = database.get_jobs_by_file_hash(file_hash)
+        resume_job_id = None
+        
+        # Filter for recent incomplete job
+        for job in existing_jobs:
+             if job['status'] not in ['completed', 'failed']: # Pending/Processing
+                 pass
+             
+             if job['status'] != 'completed':
+                 resume_job_id = job['id']
+                 break
+        
+        return {
+            "filename": os.path.basename(existing_file['path']), 
+            "original_name": existing_file['original_name'],
+            "file_hash": file_hash,
+            "deduplicated": True,
+            "resume_job_id": resume_job_id
+        }
+    elif existing_file:
+        print(f"File record found in DB but missing on disk. Re-saving: {file.filename}")
+        # Fall through to save logic below to restore the file
+        pass
+
+        pass
+    
+    # 3. New File - Save to Disk
     file_id = str(uuid.uuid4())
     extension = os.path.splitext(file.filename)[1]
     new_filename = f"{file_id}{extension}"
@@ -247,250 +304,414 @@ async def upload_file(file: UploadFile = File(...)):
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
         
-    return {"filename": new_filename, "original_name": file.filename}
+    # 4. Save/Update DB
+    # Use create_or_update_file to handle the matching hash case
+    # Since we might have fallen through from "ghost file" case
+    database.create_file(file_hash, file.filename, file_path, file.size)
+        
+    return {
+        "filename": new_filename, 
+        "original_name": file.filename,
+        "file_hash": file_hash,
+        "deduplicated": False,
+        "resume_job_id": None
+    }
 
 @app.post("/api/dub")
-async def start_dubbing(request: DubRequest, background_tasks: BackgroundTasks):
-    task_id = str(uuid.uuid4())
-    tasks[task_id] = {
-        "id": task_id,
-        "filename": request.filename, # Store filename for display
-        "input_lang": request.input_lang,
-        "output_lang": request.output_lang,
-        "target_voice": request.target_voice,
-        "speed": request.speed,
-        "status": "pending",
-        "progress": 0,
-        "step": "Queued",
-        "message": "Waiting to start...",
-        "result": None,
-        "timestamp": str(datetime.now())
-    }
-    save_history() # Save pending state
+def start_dubbing(request: DubRequest, background_tasks: BackgroundTasks):
+    # Create Job in DB
+    job_id = database.create_job(
+        filename=request.filename,
+        input_lang=request.input_lang,
+        output_lang=request.output_lang,
+        target_voice=request.target_voice,
+        speed=request.speed,
+        file_hash=request.file_hash,
+        original_filename=request.original_filename,
+        duration_limit=request.duration_limit # Persist duration limit
+    )
     
+    # Add to background
     background_tasks.add_task(
         run_dubbing_task, 
-        task_id, 
+        job_id, 
         request.filename, 
         request.input_lang, 
         request.output_lang,
         request.target_voice,
         request.speed,
-        request.duration_limit
+        request.duration_limit,
+        request.wpm
     )
     
-    return {"task_id": task_id}
+    return {"task_id": job_id}
+
+
+
+class ResumeRequest(BaseModel):
+    job_id: str
+
+@app.post("/api/resume")
+async def resume_dubbing(request: ResumeRequest, background_tasks: BackgroundTasks):
+    job = database.get_job(request.job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+        
+    if job['status'] == 'completed':
+         raise HTTPException(status_code=400, detail="Job already completed. Cannot resume.")
+
+    # Reset status to queue it
+    database.update_job_status(request.job_id, status="pending", message="Resuming job...")
+    
+    # Re-queue
+    background_tasks.add_task(
+        run_dubbing_task, 
+        request.job_id, 
+        job['filename'], 
+        job['input_lang'], 
+        job['output_lang'],
+        job['target_voice'],
+        job['speed'],
+        None,  # duration_limit not persisted in DB currently
+        None   # wpm - will use language default
+    )
+    
+    return {"status": "resumed", "task_id": request.job_id}
 
 @app.post("/api/regenerate")
-async def regenerate_dub(request: RegenerateRequest, background_tasks: BackgroundTasks):
-    task_id = request.task_id
-    if task_id not in tasks:
-        raise HTTPException(status_code=404, detail="Task not found")
-        
-    original_task = tasks[task_id]
+async def regenerate_dubbing(request: RegenerateRequest, background_tasks: BackgroundTasks):
+    """
+    Regenerate dubbed video with edited transcript segments.
+    Only regenerates changed segments, reuses cached audio for unchanged ones.
+    """
+    print(f"[Regenerate] Received request for task_id: {request.task_id}")
+    print(f"[Regenerate] Segments count: {len(request.segments)}")
+    print(f"[Regenerate] First segment: {request.segments[0] if request.segments else 'None'}")
     
-    # We create a NEW task ID for the regeneration to avoid overwriting history immediately?
-    # Or we update the existing task? 
-    # Updating existing task is better for the UI flow (user stays on same page).
-    # But we should probably mark it as "processing" again.
+    # Validate job exists
+    job = database.get_job(request.task_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
     
-    tasks[task_id]["status"] = "processing"
-    tasks[task_id]["step"] = "Regenerating"
-    tasks[task_id]["progress"] = 0
-    tasks[task_id]["message"] = "Starting regeneration..."
-    save_history()
+    # Update status
+    database.update_job_status(request.task_id, status="pending", message="Queuing regeneration...")
     
-    def run_regeneration():
-        try:
-            # Get original segments to compare
-            old_segments = original_task["result"]["source_segments"]
-            # Merge old target text into old segments for comparison if needed
-            old_target_segments = original_task["result"]["target_segments"]
-            
-            # We need to pass 'old_segments' with 'target_text' populated to google_pipeline2
-            # because google_pipeline2 expects to compare target_text.
-            # The 'source_segments' in result only have 'text' (source).
-            # So we construct a rich list.
-            
-            rich_old_segments = []
-            for i, seg in enumerate(old_segments):
-                s = seg.copy()
-                if i < len(old_target_segments):
-                    s['target_text'] = old_target_segments[i]['text']
-                rich_old_segments.append(s)
-            
-            # Run pipeline
-            # Check if we should use the trimmed file (if output name differs from input name)
-            input_filename = original_task["filename"]
-            output_path = original_task.get("result", {}).get("output_path")
-            
-            if output_path:
-                output_filename = os.path.basename(output_path)
-                # If output filename is different (e.g. has _trimmed_), check if that file exists in Uploads
-                # This ensures we use the same trimmed source for regeneration and find the correct SRT
-                potential_trimmed_path = os.path.join(UPLOAD_DIR, output_filename)
-                if output_filename != input_filename and os.path.exists(potential_trimmed_path):
-                    print(f"Using trimmed file for regeneration: {output_filename}")
-                    input_filename = output_filename
-            
-            input_path = os.path.join(UPLOAD_DIR, input_filename)
-            
-            # Versioning Output File to avoid locks
-            timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-            base_name, ext = os.path.splitext(original_task["filename"])
-            # Keep original base but append version (or just use task ID and version)
-            # Simplest: Input Name + _v_{timestamp}
-            versioned_filename = f"{base_name}_v_{timestamp_str}{ext}"
-            
-            new_result = google_pipeline2.regenerate_video(
-                video_path=input_path,
-                output_dir=OUTPUT_DIR,
-                new_segments=request.segments,
-                old_segments=rich_old_segments,
-                input_lang=original_task["input_lang"],
-                output_lang=original_task["output_lang"],
-                target_voice=original_task.get("target_voice"), 
-                speed=original_task.get("speed", 1.0),
-                output_filename_override=versioned_filename,
-                progress_callback=lambda s, p, m: update_task_progress(task_id, s, p, m)
-            )
-            
-            tasks[task_id]["status"] = "completed"
-            tasks[task_id]["progress"] = 100
-            tasks[task_id]["message"] = "Regeneration Done"
-            tasks[task_id]["result"] = new_result
-            tasks[task_id]["timestamp"] = str(datetime.now())
-            save_history()
-            
-        except Exception as e:
-            print(f"Regeneration failed: {e}")
-            tasks[task_id]["status"] = "failed"
-            tasks[task_id]["error"] = str(e)
-            save_history()
+    # Queue regeneration task
+    background_tasks.add_task(
+        regenerate_dubbing_task,
+        request.task_id,
+        request.segments,
+        request.speaker_overrides,
+        JOBS_DIR  # Pass JOBS_DIR
+    )
+    
+    return {"status": "processing", "task_id": request.task_id}
 
-    def update_task_progress(tid, step, progress, message):
-        tasks[tid]["progress"] = progress
-        tasks[tid]["step"] = step
-        tasks[tid]["message"] = message
-        print(f"Task {tid}: [{step}] {progress}% - {message}")
-
-    background_tasks.add_task(run_regeneration)
-    
-    return {"status": "started", "task_id": task_id}
 
 @app.get("/api/status/{task_id}")
 async def get_status(task_id: str):
-    if task_id not in tasks:
+    job = database.get_job(task_id)
+    if not job:
         raise HTTPException(status_code=404, detail="Task not found")
-    return tasks[task_id]
+    # Convert row to dict
+    return job
 
 @app.get("/api/history")
 async def get_history():
-    # Return list of completed tasks, sorted by timestamp desc
-    completed_tasks = [
-        t for t in tasks.values() 
-        if t.get("status") == "completed"
-    ]
-    # Sort by timestamp if available, else random
-    completed_tasks.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
-    return completed_tasks
+    jobs = database.get_all_jobs()
+    # Return as list
+    return jobs
 
 @app.get("/api/result/{task_id}")
 async def get_result(task_id: str):
-    if task_id not in tasks:
+    job = database.get_job(task_id)
+    if not job:
         raise HTTPException(status_code=404, detail="Task not found")
-    if tasks[task_id]["status"] != "completed":
+    if job["status"] != "completed":
         raise HTTPException(status_code=400, detail="Task not completed")
     
-    # Construct download URL for the output file
-    output_path = tasks[task_id]["result"]["output_path"]
+    # We need to construct the result object similar to before
+    # Retrieve segments from DB
+    segments = database.get_segments(task_id)
+    
+    # Where is output path? 
+    # Pipeline saves output to jobs/{job_id}/output/filename.mp4
+    # But we need to know the filename. 
+    # It constructs it as: os.path.splitext(filename)[0] + "_dubbed.wav" or merged video.
+    # The pipeline logic for output filename is specific.
+    # We should have stored 'output_path' in DB or standardized it.
+    # Currently DB 'jobs' table doesn't have 'output_path' column?
+    # Let's check schema.
+    # Schema: id, status, input_lang, ... filename ...
+    # It does NOT have output_path.
+    # However, we enforce directory structure: jobs/{job_id}/output/
+    # The file is likely named {filename} (original name).
+    # In `run_dubbing_task`, pipeline result returned `output_path`.
+    # We didn't save it to DB. 
+    # FIX: We should look for the file in jobs/{job_id}/output/
+    
+    base_dir = os.path.join(JOBS_DIR, task_id)
+    output_dir = os.path.join(base_dir, "output")
+    
+    # Find the output file
+    output_path = None
+    if os.path.exists(output_dir):
+        candidates = []
+        for f in os.listdir(output_dir):
+            if f.lower().endswith((".mp4", ".mkv", ".mov", ".avi")):
+                candidates.append(os.path.join(output_dir, f))
+        
+        if candidates:
+            # Simply pick the most recently modified file (Reliable for Job Isolation)
+            output_path = max(candidates, key=os.path.getmtime)
+    
+    if not output_path:
+        raise HTTPException(status_code=404, detail="Output file not found on server")
+
     filename = os.path.basename(output_path)
     
-    return {
-        "download_url": f"/api/download/{filename}",
-        "source_srt": tasks[task_id]["result"]["source_srt"],
-        "target_srt": tasks[task_id]["result"]["target_srt"],
-        "source_segments": tasks[task_id]["result"]["source_segments"],
-        "target_segments": tasks[task_id]["result"]["target_segments"]
-    }
+    # Construct source_srt and target_srt content
+    # They are in jobs/{job_id}/srt/
+    srt_dir = os.path.join(base_dir, "srt")
+    source_srt = ""
+    target_srt = ""
+    
+    name_no_ext = os.path.splitext(job['filename'])[0]
+    # Try generic names
+    # source: {name}_ASR.srt
+    # target: {name}_{lang}.srt
+    
+    # Actually checking dir is safer
+    if os.path.exists(srt_dir):
+        for f in os.listdir(srt_dir):
+            if "_ASR.srt" in f:
+                with open(os.path.join(srt_dir, f), "r", encoding="utf-8") as fr:
+                    source_srt = fr.read()
+            elif f.endswith(".srt") and "_ASR" not in f:
+                with open(os.path.join(srt_dir, f), "r", encoding="utf-8") as fr:
+                    target_srt = fr.read()
 
-@app.get("/api/download/{filename}")
-async def download_file(filename: str):
-    # Check in Output dir
-    path = os.path.join(OUTPUT_DIR, filename)
-    print(f"DEBUG: Checking download path: {path}")
-    if not os.path.exists(path):
-        print(f"DEBUG: Not found in output. Checking upload dir...")
-        # Check in Upload dir (for testing or playback of source)
-        path = os.path.join(UPLOAD_DIR, filename)
-        print(f"DEBUG: Checking upload path: {path}")
+    # Split segments into source and target for legacy frontend compatibility?
+    # Frontend expects "source_segments" and "target_segments".
+    # Our DB segments have both.
+    # We can just pass the same list for both, or just map carefully.
+    
+    # Find original video in input directory
+    input_dir = os.path.join(base_dir, "input")
+    os.makedirs(input_dir, exist_ok=True) # Ensure it exists
+    
+    original_video_path = None
+    original_video_url = None
+    
+    # 1. Check jobs/{id}/input
+    if os.path.exists(input_dir):
+        for f in os.listdir(input_dir):
+            if f.lower().endswith((".mp4", ".mov", ".avi", ".mkv", ".webm")):
+                original_video_path = os.path.join(input_dir, f)
+                original_video_url = f"/api/download/{task_id}/input/{f}"
+                break
+    
+    # 2. Fallback: Check UPLOAD_DIR and copy if missing
+    if not original_video_path and job.get('filename'):
+        upload_path = os.path.join(UPLOAD_DIR, job['filename'])
+        if os.path.exists(upload_path):
+            # Copy to input dir for consistency and access
+            dest_path = os.path.join(input_dir, job['filename'])
+            import shutil
+            try:
+                shutil.copy2(upload_path, dest_path)
+                original_video_path = dest_path
+                original_video_url = f"/api/download/{task_id}/input/{job['filename']}"
+            except Exception as e:
+                print(f"Failed to copy original file to input dir: {e}")
+
+    response = {
+        "download_url": f"/api/download/{task_id}/{filename}", # Changed URL structure for isolation
+        "source_srt": source_srt,
+        "target_srt": target_srt,
+        "source_segments": segments,
+        "target_segments": [{**s, "text": s["target_text"]} for s in segments] # Map target_text to text for frontend
+    }
+    
+    # Add original video URL if available
+    if original_video_path and os.path.exists(original_video_path):
+        response["original_video_url"] = original_video_url
+    
+    return response
+
+@app.get("/api/download/{task_id}/{filepath:path}")
+async def download_file(task_id: str, filepath: str):
+    """Download output or input files from task directory."""
+    # Security: Ensure task_id is valid UUID
+    try:
+        uuid.UUID(task_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid Task ID")
+
+    # Base directory for this job
+    base_dir = os.path.join(JOBS_DIR, task_id)
+    
+    # Check if path includes subdirectory (e.g., "input/video.mp4")
+    if "/" in filepath:
+        # Full path with subdirectory
+        path = os.path.join(base_dir, filepath)
+    else:
+        # Legacy: just filename, default to output directory
+        path = os.path.join(base_dir, "output", filepath)
+    
+    # Security: Validate path doesn't escape job directory
+    final_path_abs = os.path.abspath(path)
+    base_dir_abs = os.path.abspath(base_dir)
+    if not final_path_abs.startswith(base_dir_abs):
+        raise HTTPException(status_code=403, detail="Access denied")
     
     if not os.path.exists(path):
-        print(f"DEBUG: File not found: {filename}")
-        raise HTTPException(status_code=404, detail=f"File not found: {filename}")
-
+        raise HTTPException(status_code=404, detail=f"File not found: {filepath}")
+    
+    filename = os.path.basename(filepath) # Use original filepath for filename in response
+    
     media_type = "application/octet-stream"
-    if filename.endswith(".mp4"):
-        media_type = "video/mp4"
-    elif filename.endswith(".wav"):
-        media_type = "audio/wav"
-    elif filename.endswith(".srt"):
-        media_type = "text/plain"
+    if filename.endswith(".mp4"): media_type = "video/mp4"
+    elif filename.endswith(".wav"): media_type = "audio/wav"
+    elif filename.endswith(".srt"): media_type = "text/plain"
 
     return FileResponse(
         path, 
         media_type=media_type, 
         filename=filename,
-        headers={"Content-Disposition": f"attachment; filename={filename}"} if "download" in filename else None
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
 
+@app.get("/api/thumbnail/{task_id}")
+async def get_thumbnail(task_id: str):
+    thumb_name = f"{task_id}.jpg"
+    thumb_path = os.path.join(THUMBNAIL_DIR, thumb_name)
+    
+    if os.path.exists(thumb_path):
+        return FileResponse(thumb_path, media_type="image/jpeg")
+    
+    raise HTTPException(status_code=404, detail="Thumbnail not found")
+
 @app.delete("/api/delete/{task_id}")
-async def delete_task(task_id: str):
-    if task_id not in tasks:
+def delete_task(task_id: str):
+    job = database.get_job(task_id)
+    if not job:
         raise HTTPException(status_code=404, detail="Task not found")
     
-    task = tasks[task_id]
-    print(f"Deleting task {task_id}...")
+    print(f"Deleting job {task_id}...")
     
-    # Helper to safely delete
-    def safe_remove(path):
-        if path and os.path.exists(path):
-            try:
-                os.remove(path)
-                print(f"Deleted: {path}")
-            except Exception as e:
-                print(f"Error deleting {path}: {e}")
-
-    # 1. Delete Output Video
-    if task.get("result"):
-        safe_remove(task["result"].get("output_path"))
-        
-    # 2. Delete Uploaded Input File (optional, but good for cleanup if valid)
-    # We stored 'filename' in task, which refers to the uploaded file name in UPLOAD_DIR
-    input_filename = task.get("filename")
-    if input_filename:
-        # Check if it was a generated UUID filename or original. 
-        # Our upload logic: new_filename = f"{file_id}{extension}"
-        # We might want to be careful not to delete shared files if that was a thing, but here it's 1-1.
-        input_path = os.path.join(UPLOAD_DIR, input_filename)
-        safe_remove(input_path)
-
-    # 3. Delete related SRTs
-    # Iterate SRT dir and delete any file starting with task_id
-    if os.path.exists(SRT_DIR):
-        for f in os.listdir(SRT_DIR):
-            if f.startswith(task_id):
-                safe_remove(os.path.join(SRT_DIR, f))
-
-    # 4. Remove from memory and save
-    del tasks[task_id]
-    save_history()
+    # 1. Delete DB Entry
+    database.delete_job(task_id)
+    
+    # 2. Delete Job Directory
+    job_dir = os.path.join(JOBS_DIR, task_id)
+    if os.path.exists(job_dir):
+        try:
+            shutil.rmtree(job_dir)
+            print(f"Deleted directory: {job_dir}")
+        except Exception as e:
+            print(f"Error deleting directory {job_dir}: {e}")
+            
+    # 3. Delete Thumbnail
+    thumb_path = os.path.join(THUMBNAIL_DIR, f"{task_id}.jpg")
+    if os.path.exists(thumb_path):
+        os.remove(thumb_path)
     
     return {"status": "deleted", "id": task_id}
 
 @app.get("/api/languages")
 async def get_languages():
     return {"languages": LANGUAGES}
+
+@app.get("/api/logs/{task_id}")
+def get_task_logs(task_id: str):
+    logs = database.get_logs(task_id)
+    return {"logs": logs}
+
+@app.post("/api/tool/translate")
+def adhoc_translate(req: TranslateRequest):
+    try:
+        # Construct Prompt
+        base_prompt = req.prompt if req.prompt and req.prompt.strip() else f"Translate the following text from {req.source_lang} to {req.target_lang}."
+        
+        final_prompt = f"""
+        {base_prompt}
+        
+        Input Text: "{req.text}"
+        
+        Instructions:
+        1. Maintain the original tone but make it CASUAL and SPOKEN (Informal).
+        2. {f'Output Language: {req.target_lang}'}
+        3. Return ONLY the translation, no extra text.
+        4. Focus on how people actually speak (natural conversational flow).
+        """
+        
+        resp = google_pipeline2.retry_manager.call(lambda: google_pipeline2.get_client().models.generate_content(model="gemini-2.5-pro", contents=final_prompt))
+        return {"translated": resp.text.strip()}
+    except Exception as e:
+        print(f"Translation Tool Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/tool/asr")
+async def asr_tool(file: UploadFile = File(...), lang: str = Form("en")):
+    temp_path = f"temp_asr_{uuid.uuid4()}.webm"
+    try:
+        # Save Upload
+        with open(temp_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+            
+        # Upload to Gemini - Use genai SDK directly for simpler handling
+        import google.generativeai as genai
+        import time
+        from pydub import AudioSegment
+        genai.configure(api_key=google_pipeline2.get_api_key())
+        
+        # Convert webm to wav (Gemini doesn't handle webm well)
+        audio = AudioSegment.from_file(temp_path, format="webm")
+        wav_path = temp_path.replace(".webm", ".wav")
+        audio.export(wav_path, format="wav")
+        
+        # Upload wav file
+        uploaded_file = genai.upload_file(wav_path)
+        
+        # Wait for file to become ACTIVE
+        while uploaded_file.state.name == "PROCESSING":
+            time.sleep(1)
+            uploaded_file = genai.get_file(uploaded_file.name)
+        
+        if uploaded_file.state.name != "ACTIVE":
+            raise Exception(f"File processing failed: {uploaded_file.state.name}")
+        
+        # Transcribe
+        prompt = f"""
+        Transcribe the audio exactly as spoken.
+        Target Language: {lang} (if audio is in this language, transcribe it. if audio is different, transcribe what is spoken).
+        Output ONLY the transcript text. No timestamps.
+        """
+        
+        model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        resp = model.generate_content([prompt, uploaded_file])
+        
+        return {"transcript": resp.text.strip()}
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"ASR Tool Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        # Cleanup both temp files
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+        wav_path = temp_path.replace(".webm", ".wav")
+        if os.path.exists(wav_path):
+            try:
+                os.remove(wav_path)
+            except OSError:
+                pass
 
 if __name__ == "__main__":
     import uvicorn
