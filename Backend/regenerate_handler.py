@@ -67,6 +67,11 @@ def regenerate_dubbing_task(task_id: str, edited_segments: list, speaker_overrid
         # Update job status
         database.update_job_status(task_id, status="processing", message="Starting regeneration...")
         
+        # Save speaker overrides to database
+        print(f"[Regenerate] Received speaker_overrides: {speaker_overrides}")
+        database.update_speaker_overrides(task_id, speaker_overrides)
+        database.log_event(task_id, f"Speaker overrides received: {json.dumps(speaker_overrides)}")
+        
         job = database.get_job(task_id)
         if not job:
             raise Exception("Job not found")
@@ -276,7 +281,15 @@ def regenerate_dubbing_task(task_id: str, edited_segments: list, speaker_overrid
             start_ms = parse_srt_time(seg['start'])
             end_ms = parse_srt_time(seg['end'])
             
-            voice_id = speaker_overrides.get(str(i), job.get('target_voice'))
+            # Extract speaker from segment to lookup voice override
+            speaker = seg.get('speaker', 'Speaker 1')
+            
+            # Look up voice override by speaker name (e.g., "Speaker 2")
+            # Falls back to job's default target_voice if no override found
+            voice_id = speaker_overrides.get(speaker, job.get('target_voice'))
+            
+            print(f"[Regenerate] Seg {i}: speaker={speaker}, voice_id={voice_id}, overrides={speaker_overrides}")
+            database.log_event(task_id, f"Seg {i}: Using speaker={speaker}, voice={voice_id}")
             
             # Create segment in format expected by process_segment_task
             segment_for_processing = {

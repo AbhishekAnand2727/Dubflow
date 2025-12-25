@@ -108,6 +108,11 @@ def init_db():
     except sqlite3.OperationalError:
         pass
 
+    try:
+        c.execute("ALTER TABLE jobs ADD COLUMN speaker_overrides TEXT")  # JSON string
+    except sqlite3.OperationalError:
+        pass
+
     # Events/Logs Table (For detailed process logs)
     c.execute('''
         CREATE TABLE IF NOT EXISTS events (
@@ -234,6 +239,15 @@ def update_job_status(job_id, status=None, progress=None, step=None, message=Non
         c.execute(sql, params)
         conn.commit()
     # Don't close - thread-local connection will be reused
+
+def update_speaker_overrides(job_id, speaker_overrides_dict):
+    """Update speaker overrides for a job."""
+    import json
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("UPDATE jobs SET speaker_overrides = ? WHERE id = ?", 
+              (json.dumps(speaker_overrides_dict), job_id))
+    conn.commit()
 
 def get_all_jobs():
     conn = get_db()

@@ -940,8 +940,13 @@ function App() {
     // Helper to extract speaker number from text
     const extractSpeaker = (text) => {
       if (!text) return null;
-      const match = text.match(/\[Speaker (\d+)\]/);
-      return match ? parseInt(match[1]) : null;
+      // Match ALL speaker tags and get the LAST one (correct speaker)
+      // E.g., "[Speaker 1] [Speaker 2] text" -> Speaker 2 is correct
+      const matches = text.match(/\[Speaker (\d+)\]/g);
+      if (!matches || matches.length === 0) return null;
+      const lastMatch = matches[matches.length - 1];
+      const speakerNum = lastMatch.match(/\[Speaker (\d+)\]/);
+      return speakerNum ? parseInt(speakerNum[1]) : null;
     };
 
     // Helper to strip speaker tags from display text
@@ -991,9 +996,10 @@ function App() {
             const displaySourceText = stripSpeakerTags(sourceText);
             const displayTargetText = stripSpeakerTags(targetText);
 
-            // Get available voices: Target language first, then English at bottom
-            const targetLangVoices = availableVoices.filter(v => v.lang === result.output_lang);
-            const englishVoices = availableVoices.filter(v => v.lang === 'English');
+            // Get available voices: Target language first, then 4-5 English backup options
+            const outputLang = activeTask?.output_lang || result?.output_lang || settings.outputLang;
+            const targetLangVoices = availableVoices.filter(v => v.lang === outputLang);
+            const englishVoices = availableVoices.filter(v => v.lang === 'English').slice(0, 5); // Limit to 5 English voices
             const relevantVoices = [...targetLangVoices, ...englishVoices];
 
             // Detect gap with next segment
@@ -1073,12 +1079,12 @@ function App() {
                             <select
                               className="text-xs bg-white border border-orange-200 rounded px-2 py-0.5 text-slate-700 focus:ring-2 focus:ring-orange-500 outline-none cursor-pointer"
                               value={speakerOverrides[`Speaker ${speaker}`] || ""}
-                              onChange={(e) => setSpeakerOverrides(prev => ({ ...prev, [`Speaker ${speaker}`]: e.target.value }))}
+                              onChange={(e) => onVoiceOverride && onVoiceOverride(`Speaker ${speaker}`, e.target.value)}
                               onClick={(e) => e.stopPropagation()}
                             >
                               <option value="">Default Voice</option>
                               {relevantVoices.map(v => (
-                                <option key={v.id} value={v.id}>{v.name} ({v.lang})</option>
+                                <option key={v.id} value={v.id}>{v.name} - {v.gender} ({v.lang})</option>
                               ))}
                             </select>
                           )}
@@ -1584,14 +1590,33 @@ function App() {
       setIsRegenerating(true);
       try {
         // Construct segments payload
-        // We need to send list of {start, end, text(source), target_text}
-        const segmentsPayload = localTranscripts.source.map((srcSeg, i) => ({
-          start: srcSeg.start,
-          end: srcSeg.end,
-          text: edits.source[i] !== undefined ? edits.source[i] : srcSeg.text,
-          target_text: edits.target[i] !== undefined ? edits.target[i] : (localTranscripts.target[i]?.text || ""),
-          deleted: !!deletedIndices[i] // Include deleted flag
-        }));
+        // We need to send list of {start, end, text(source), target_text, speaker}
+        const segmentsPayload = localTranscripts.source.map((srcSeg, i) => {
+          // Extract speaker from ORIGINAL source text (before edits) to preserve speaker info
+          // Use the extractSpeaker helper that gets the LAST speaker tag
+          const extractSpeaker = (text) => {
+            if (!text) return null;
+            const matches = text.match(/\[Speaker (\d+)\]/g);
+            if (!matches || matches.length === 0) return null;
+            const lastMatch = matches[matches.length - 1];
+            const speakerNum = lastMatch.match(/\[Speaker (\d+)\]/);
+            return speakerNum ? parseInt(speakerNum[1]) : null;
+          };
+
+          const speakerNum = extractSpeaker(srcSeg.text);
+          const speaker = speakerNum ? `Speaker ${speakerNum}` : 'Speaker 1';
+
+          const sourceText = edits.source[i] !== undefined ? edits.source[i] : srcSeg.text;
+
+          return {
+            start: srcSeg.start,
+            end: srcSeg.end,
+            text: sourceText,
+            target_text: edits.target[i] !== undefined ? edits.target[i] : (localTranscripts.target[i]?.text || ""),
+            deleted: !!deletedIndices[i], // Include deleted flag
+            speaker: speaker // Include speaker for voice override lookup
+          };
+        });
 
         await axios.post(`${API_BASE}/regenerate`, {
           task_id: activeTask.id,
@@ -1620,6 +1645,10 @@ function App() {
                 source: resultRes.data.source_segments || [],
                 target: resultRes.data.target_segments || []
               });
+              // Persist speaker overrides from result if available
+              if (resultRes.data.speaker_overrides) {
+                setSpeakerOverrides(resultRes.data.speaker_overrides);
+              }
               setView('player'); // Changed from 'result' to 'player' to stay on the player view
               setState('idle');
               setIsRegenerating(false);
