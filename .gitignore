@@ -9,6 +9,12 @@ __pycache__/
 .env.local
 .env.*
 
+# Database
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
 # Generated Media (Videos, Audio)
 *.mp4
 *.mp3
@@ -21,6 +27,12 @@ Backend/Videos/uploads/
 Backend/SRT/
 SRT/
 Video out/
+
+# Runtime Data & User Content
+Backend/jobs/
+Backend/Uploads/
+Backend/Thumbnails/
+metrics.json
 
 # Logs
 *.log
@@ -36,3 +48,7 @@ Thumbs.db
 
 # Cache
 .cache/
+
+# Debug/Test Scripts
+reproduce_issue.py
+analyze_logs.py

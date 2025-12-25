@@ -1,134 +1,128 @@
 # DubFlow
 
-**DubFlow** is an AI dubbing application that automatically translates and dubs videos into 11 Indian languages. It features a robust backend pipeline leveraging Gemini 2.5 pro ASR, Gemini 2.5 pro MT and Google Cloud TTS and modern, responsive "Warm SaaS" UI.
+**DubFlow** is an advanced AI dubbing automation platform that seamlessly translates and dubs videos into 11 Indian languages. It leverages a state-of-the-art pipeline orchestrated with **Google Gemini Pro 2.5** (for ASR and Adaptive Translation) and **Google Cloud TTS** (Neural2/Journey/Chirp), wrapped in a modern React + FastAPI architecture.
 
-![DubFlow Dashboard](image%20copy.png)
+![DubFlow Dashboard](image.png)
 
-## Features
+## 1. Project Overview
 
--   **Multi-Language Support**: Dub content into Hindi, Tamil, Telugu, Kannada, Malayalam, Marathi, Gujarati, Punjabi, Assamese, and Odia.
--   **End-to-End Pipeline**: Automated ASR (Transcription), MT (Translation), and TTS (Speech Synthesis).
--   **Interactive Dashboard**:
-    -   **Video Library**: View and manage all your dubbed videos.
-    -   **Smart Player**: Watch videos with synchronized, auto-scrolling transcripts (Source vs Target).
-    -   **Real-time Progress**: Visualizer for the AI pipeline steps.
--   **Persistence**: Automatically saves task history and restores it on server restart.
--   **Auto-Cleanup**: Automatically syncs the dashboard with the file system, removing deleted videos.
+DubFlow solves the complex challenge of video dubbing by automating not just translation, but **synchronization**. The system ensures that the dubbed audio matches the timing of the original speaker, preventing the common "voiceover drift" found in basic tools. It features a "Warm SaaS" UI for managing jobs, editing transcripts, and monitoring real-time progress.
 
-## Technology Stack
+---
+
+## 2. Technology Stack
 
 ### Frontend
--   **Framework**: [React 18](https://react.dev/)
--   **Build Tool**: [Vite](https://vitejs.dev/)
--   **Styling**: [Tailwind CSS](https://tailwindcss.com/) + Custom CSS for glassmorphism and animations.
--   **Icons**: [Lucide React](https://lucide.dev/)
--   **HTTP Client**: [Axios](https://axios-http.com/)
+- **Framework:** React 18 (Vite)
+- **Styling:** TailwindCSS (with extensive custom animations and glassmorphism)
+- **Icons:** Lucide React
+- **State Management:** React Hooks (`useState`, `useEffect`, `useRef`)
+- **API Interaction:** Axios
+- **Key Components:**
+  - `TranscriptViewer`: Interactive segment editor with Merge/Split/Delete capabilities.
+  - `PlayerState`: Synchronization of video playback with transcript.
+  - `ProcessingState`: Real-time job status polling.
 
 ### Backend
--   **Framework**: [FastAPI](https://fastapi.tiangolo.com/) (Python)
--   **Server**: [Uvicorn](https://www.uvicorn.org/)
--   **Audio Processing**: `ffmpeg`, `pydub`
--   **AI Models**:
-    -   **ASR & MT**: Google Gemini 2.5 Pro (via `google.generativeai`)
-    -   **TTS**: Google Cloud Text-to-Speech
+- **Server:** FastAPI (Python 3.10+)
+- **Database:** SQLite (with Thread-local connection management)
+- **Core Processing:**
+  - **ASR:** Google **Gemini Pro 2.5** (Multimodal) / Whisper (Legacy/Alternative)
+  - **Translation (MT):** Google **Gemini Pro 2.5** (Context-aware, Adaptive)
+  - **TTS:** Google Cloud Text-to-Speech (Neural2 / Journey / Chirp voices)
+  - **Audio Processing:** PyDub (pydub), FFmpeg
+- **Concurrency:** `ThreadPoolExecutor` from `concurrent.futures`
 
-## AI Pipeline Architecture
+---
 
-The core of DubFlow is an advanced orchestration of **Gemini 2.5 Pro** and **Google Cloud TTS**, handled by `google_pipeline2.py`. Here is the step-by-step workflow:
+## 3. The Dubbing Pipeline (`google_pipeline2.py`)
 
-### 1. Audio Preprocessing
--   **Extraction**: Uses `ffmpeg` to extract audio from the uploaded video.
--   **Chunking**: Splits the audio into **5-minute chunks** to optimize processing for the ASR model.
+The pipeline operates in 4 major stages:
 
-### 2. Advanced ASR (Automatic Speech Recognition)
--   **Model**: **Gemini 2.5 Pro**.
--   **Transcription**: Converts audio chunks into a structured JSON format, which is then compiled into a master SRT file.
--   **Smart Prompting**:
-    -   Removes filler words.
-    -   Marks silences explicitly.
-    -   Performs grammar correction.
-    -   Fixes segmentation logic.
-    -   Handles multiple speaker diarization.
--   **Verification**:
-    -   **Hallucination Check**: Implements a retry backoff logic if timestamp hallucinations are detected.
-    -   **Final Validation**: Verifies timestamps one last time before passing data to the translation layer.
+### Stage 1: Analysis & ASR
+1.  **Extraction:** Audio is extracted from the video using FFmpeg.
+2.  **Transcription:** The audio is sent to **Gemini Pro 2.5** to generate a timestamped SRT with speaker diarization.
+3.  **Cleaning:** A double-pass cleaning strategy removes hallucinated speaker labels (e.g., `[Speaker 1]`) from the source text.
 
-### 3. Context-Aware MT (Machine Translation)
--   **Model**: **Gemini 2.5 Pro**.
--   **Word Budget Method**: Translates text while strictly adhering to the time constraints of the original segment.
--   **Technical Terms**: Prompts the model to **keep technical terms in English** (e.g., "API", "Database").
--   **Adaptive Translation**:
-    -   **Elaboration**: Expands short translations to fill time.
-    -   **Summarization**: Condenses long translations to fit time.
+### Stage 2: Adaptive Translation (The "Brain")
+This is the most complex component. It doesn't just translate; it **fits** the translation to the time constraint.
+- **WPM Calibration:** Each language has a specific "Words Per Minute" setting (e.g., Hindi: 210, English: 180).
+- **Feedback Loop:**
+  1.  Generate initial translation.
+  2.  Estimate duration based on WPM.
+  3.  Compare with `target_duration`.
+  4.  **If too long (> 500ms diff):** trigger `summarize` mode ("Make it shorter").
+  5.  **If too short (> 500ms diff):** trigger `elaborate` mode ("Add filler words/detail").
+  6.  **Panic Mode:** If 2-3 retries fail, strictly truncate or stretch speed.
 
-### 4. Precision TTS (Text-to-Speech) & Sync
--   **Model**: **Google Cloud TTS** (Neural2 voices).
--   **Duration Loop**:
-    1.  Calculates the estimated spoken duration of the translated text.
-    2.  **Feedback Loop**: If the duration deviation is **> 0.5 seconds**, the text is sent back to the MT layer for re-elaboration or re-summarization.
-    3.  **Fine-Tuning**: If the deviation is **≤ 0.5 seconds**, the audio speed is adjusted by up to **±15%** to achieve perfect sync.
--   **Result**: Audio that matches the speaker's lip movements as closely as possible without sounding artificial.
+### Stage 3: TTS Generation
+- **Voice Selection:** Matches gender/speaker to specific Google TTS voices.
+- **Safeguards:** 
+  - **Hallucination Check:** `clean_text_for_tts` removes tags from the *translated* text just before TTS generation to prevent the AI voice from reading metadata.
+  - **Caching:** Hashes text+voice+speed to avoid regenerating identical audio.
 
-### 5. Final Assembly
--   **Mixing**: Merges the new dubbed audio track with the original video.
--   **Ducking**: Lowers the volume of the original background audio when speech is present, ensuring the dub is clear while retaining ambient sound.
+### Stage 4: Audio Assembly
+- **Sequential Assembly:** Segments are appended one by one.
+  - If a segment finishes *early*, silence is inserted to match the next start time.
+  - If a segment runs *late* (overlap), the next segment starts immediately after, pushing the timeline slightly but **guaranteeing no audio collision**.
+- **Mixing:** The final dub track is merged with the video using FFmpeg.
 
-##  Installation & Run
+---
 
-### Prerequisites
--   Node.js & npm
--   Python 3.11+
--   `ffmpeg` installed and added to PATH.
--   Google Gemini API Key
+## 4. Key Challenges & Solutions
+
+### A. ASR Hallucinations & Artifacts
+- **Issue:** ASR models often include "[Speaker 1]" or metadata in the spoken text.
+- **Fix:** Implemented a **Double-Pass Cleaning Strategy**:
+  1.  **Source Loop:** `while` loop removes *all* leading speaker tags from source text.
+  2.  **Target Safety Net:** Cleaning logic applied to the *translated* text before TTS catch hallucinations.
+
+### B. Synchronization & "The Buffer"
+- **Issue:** Translations were often too long or too short, causing "rushed" speech or awkward silence.
+- **Solution:** **Simplification**. 
+  - Tuned **WPM** (Words Per Minute) per language to match reality (e.g., English lowered to 180).
+  - Used a constant feedback buffer to drive the adaptive translation engine.
+
+### C. Overlaps
+- **Issue:** Independent segments often overlapped when the previous one ran long.
+- **Fix:** Switched to **Sequential Assembly**, where audio is placed relative to the previous clip's actual end time, ensuring 0% overlap.
+
+---
+
+## 5. Features
+
+### Interactive Editor
+- **Transcript View:** Edit Source and Target text.
+- **Timeline Controls:** Edit Start/End timestamps.
+- **Operations:**
+  - **Merge:** Combine two segments into one.
+  - **Split:** (New!) Click a word to split a segment precisely at that point.
+  - **Delete/Restore:** Toggle exclusion of segments.
+
+### Dashboard
+- **History:** View all past jobs.
+- **Status:** Real-time progress updates.
+- **Download:** Get final video or SRTs.
+
+---
+
+## 6. Installation & Run
 
 ### 1. Backend Setup
 ```bash
 cd Backend
-# Create virtual environment (optional but recommended)
 python -m venv venv
-# Activate venv (Windows: venv\Scripts\activate, Mac/Linux: source venv/bin/activate)
-
-# Install dependencies
-pip install fastapi uvicorn python-multipart google-generativeai google-cloud-texttospeech pydub requests python-dotenv
-
-# Create .env file
-echo "GEMINI_API_KEY=your_api_key_here" > .env
-
-# Run Server
+# Windows: venv\Scripts\activate | Mac/Linux: source venv/bin/activate
+pip install -r requirements.txt
+echo "GEMINI_API_KEY=your_key" > .env
 python -m uvicorn server:app --host 0.0.0.0 --port 8001 --reload
 ```
 
 ### 2. Frontend Setup
 ```bash
 cd Frontend
-# Install dependencies
 npm install
-
-# Run Dev Server
 npm run dev
 ```
 
 Access the app at `http://localhost:5173`.
-
-## 📂 Project Structure
-
-```
-DubFlow/
-├── Backend/
-│   ├── server.py              # FastAPI application & endpoints
-│   ├── google_pipeline2.py    # Core AI pipeline logic
-│   ├── history.json           # Task persistence
-│   ├── Video out/             # Generated dubbed videos
-│   ├── SRT/                   # Generated transcripts
-│   └── ...
-├── Frontend/
-│   ├── src/
-│   │   ├── App.jsx            # Main React component (Dashboard, Player, Config)
-│   │   ├── App.css            # Global styles & animations
-│   │   └── ...
-│   ├── vite.config.js         # Vite configuration
-│   └── ...
-└── README.md                  # This file
-```
-
-### Done by Abhishek Anand
