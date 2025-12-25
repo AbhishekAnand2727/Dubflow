@@ -572,11 +572,19 @@ def parse_gemini_json(response_text, offset_ms=0, chunk_duration_ms=None, log_ca
             start_ms = local_start + offset_ms
             end_ms = local_end + offset_ms
             
+            # Extract speaker first
+            speaker = seg.get('speaker', 'Speaker 1')
+            
+            # Clean inline speaker tags from text (e.g., "[Speaker 1] [Speaker 2] text" -> "text")
+            # This fixes duplicate tags where Gemini adds tags to both the speaker field AND inline in text
+            clean_text = seg['text']
+            clean_text = re.sub(r'\[Speaker \d+\]\s*', '', clean_text).strip()
+            
             processed_segments.append({
                 "start": start_ms,
                 "end": end_ms,
-                "text": seg['text'],
-                "speaker": seg.get('speaker', 'Speaker 1'),
+                "text": clean_text,
+                "speaker": speaker,
                 "start_str": srt_utils.format_srt_time(start_ms),
                 "end_str": srt_utils.format_srt_time(end_ms)
             })
@@ -874,7 +882,7 @@ def generate_srt_gemini(video_path: str, input_lang: str = "Hindi", model: str =
             
     return segments_to_srt(all_segments)
 
-def translate_adaptive(text, target_duration_sec, input_lang, output_lang, feedback=None, time_diff=0.0, words_to_add=0, gender=None, cache=None, target_wpm=None, tts_speed=1.0, global_source_wpm=None):
+def translate_adaptive(text, target_duration_sec, input_lang, output_lang, feedback=None, time_diff=0.0, words_to_add=0, gender=None, cache=None, target_wpm=None, tts_speed=1.0):
     """Adaptive translation with word budget based on WPM and duration."""
     
     # Use fixed WPM from language table
@@ -1038,7 +1046,7 @@ def get_media_duration_ms(path):
         print(f"Error getting duration for {path}: {e}")
         return 0
 
-def process_segment_task(seg, i, total, input_lang, output_lang, target_voice=None, speed=1.0, forced_target_text=None, status_reporter=None, status=None, log_callback=None, voice_manager=None, cache=None, temp_dir=None, job_id=None, target_wpm=None, global_source_wpm=None):
+def process_segment_task(seg, i, total, input_lang, output_lang, target_voice=None, speed=1.0, forced_target_text=None, status_reporter=None, status=None, log_callback=None, voice_manager=None, cache=None, temp_dir=None, job_id=None, target_wpm=None):
     """Processes a single segment. If forced_target_text is provided, skips MT and text adaptation."""
     def log(msg):
         # Prefer database logging if job_id available
@@ -1104,7 +1112,7 @@ def process_segment_task(seg, i, total, input_lang, output_lang, target_voice=No
         # If forced, we skip the adaptive MT step
     else:
         # Pass tts_speed (which is 'speed' argument) to adaptive logic
-        current_translated_text = translate_adaptive(source_text, target_duration_sec, input_lang, output_lang, gender=target_voice, cache=cache, target_wpm=target_wpm, tts_speed=speed, global_source_wpm=global_source_wpm)
+        current_translated_text = translate_adaptive(source_text, target_duration_sec, input_lang, output_lang, gender=target_voice, cache=cache, target_wpm=target_wpm, tts_speed=speed)
     
     best_audio = None
     best_text = current_translated_text
@@ -1145,7 +1153,7 @@ def process_segment_task(seg, i, total, input_lang, output_lang, target_voice=No
                     source_text, target_duration_sec, input_lang, output_lang,
                     feedback="panic", time_diff=abs(diff_sec),
                     gender=target_voice, cache=cache, target_wpm=target_wpm,
-                    tts_speed=speed, global_source_wpm=global_source_wpm
+                    tts_speed=speed
                 )
                 # SAFEGUARD
                 audio_bytes_panic = generate_google_tts(clean_text_for_tts(panic_text), get_api_key(), voice_name=voice_name, speaking_rate=speed, cache=cache)
@@ -1183,7 +1191,7 @@ def process_segment_task(seg, i, total, input_lang, output_lang, target_voice=No
                         source_text, target_duration_sec, input_lang, output_lang,
                         feedback="summarize", time_diff=diff_sec, words_to_add=words_to_remove,  # Reusing words_to_add param
                         gender=target_voice, cache=cache, target_wpm=target_wpm,
-                        tts_speed=speed, global_source_wpm=global_source_wpm
+                        tts_speed=speed
                     )
                     # SAFEGUARD
                     audio_bytes_v2 = generate_google_tts(clean_text_for_tts(summarized_text), get_api_key(), voice_name=voice_name, speaking_rate=speed, cache=cache)
@@ -1205,7 +1213,7 @@ def process_segment_task(seg, i, total, input_lang, output_lang, target_voice=No
                         source_text, target_duration_sec, input_lang, output_lang,
                         feedback="elaborate", time_diff=abs(diff_sec), words_to_add=words_to_adjust,
                         gender=target_voice, cache=cache, target_wpm=target_wpm,
-                        tts_speed=speed, global_source_wpm=global_source_wpm
+                        tts_speed=speed
                     )
                     # SAFEGUARD
                     audio_bytes_v2 = generate_google_tts(clean_text_for_tts(elaborated_text), get_api_key(), voice_name=voice_name, speaking_rate=speed, cache=cache)
@@ -1230,7 +1238,7 @@ def process_segment_task(seg, i, total, input_lang, output_lang, target_voice=No
                         source_text, target_duration_sec, input_lang, output_lang,
                         feedback="panic", time_diff=abs(gap_v2),
                         gender=target_voice, cache=cache, target_wpm=target_wpm,
-                        tts_speed=speed, global_source_wpm=global_source_wpm
+                        tts_speed=speed
                     )
                     # SAFEGUARD
                     audio_bytes_v3 = generate_google_tts(clean_text_for_tts(panic_text), get_api_key(), voice_name=voice_name, speaking_rate=speed, cache=cache)
@@ -1447,25 +1455,7 @@ def process_video(job_id: str, video_path: str, duration_limit: Optional[int] = 
     
     segments = srt_utils.parse_srt(srt_content)
     
-    # --- GLOBAL WPM CALCULATION ---
-    # Calculate average source WPM across ALL segments to stabilize the ratio
-    total_source_words = 0
-    total_source_duration_ms = 0
-    for s in segments:
-        total_source_words += len(s.get('text', '').split())
-        # Parse timestamps if they're strings
-        start_ms = s['start'] if isinstance(s['start'], (int, float)) else srt_utils.parse_srt_time(s['start'])
-        end_ms = s['end'] if isinstance(s['end'], (int, float)) else srt_utils.parse_srt_time(s['end'])
-        total_source_duration_ms += (end_ms - start_ms)
-    
-    global_source_wpm = 160 # Default
-    if total_source_duration_ms > 0:
-        total_min = total_source_duration_ms / 1000.0 / 60.0
-        global_source_wpm = total_source_words / total_min
-        log(f"Global Source WPM Calculated: {int(global_source_wpm)} ({total_source_words} words / {total_min:.2f} min)")
-    else:
-        log("Warning: Total duration is 0, defaulting Global WPM to 160.")
-        
+
     processed_results = [None] * len(segments)
     
     total_segments = len(segments)
@@ -1496,7 +1486,7 @@ def process_video(job_id: str, video_path: str, duration_limit: Optional[int] = 
                 temp_dir=temp_dir,      # Pass local Temp
                 job_id=job_id,          # For logging
                 target_wpm=target_wpm,   # User WPM preference
-                global_source_wpm=global_source_wpm # Global WPM
+
             ))
         
         for future in as_completed(futures):

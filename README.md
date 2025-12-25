@@ -104,6 +104,63 @@ This is the most complex component. It doesn't just translate; it **fits** the t
 - **Status:** Real-time progress updates.
 - **Download:** Get final video or SRTs.
 
+### Advanced Video Player \u0026 Expert Review Interface
+
+![DubFlow Video Player](image%20copy.png)
+
+The video player window provides a professional-grade interface for language experts to review and refine dubbing quality:
+
+#### **Dual Transcript View**
+- **Side-by-Side Display:** Source and target language transcripts are displayed simultaneously for easy comparison.
+- **Auto-Scroll Sync:** Transcripts automatically scroll and highlight the current segment as the video plays, maintaining perfect synchronization.
+- **Real-Time Playback:** Click any segment to instantly jump to that point in the video.
+
+#### **Expert Editing Tools**
+Language experts have full control to refine translations and ensure quality:
+
+1. **Direct Text Editing:** Both source and target text can be edited inline with live preview.
+2. **Timestamp Adjustment:** Precise control over segment start/end times for perfect synchronization.
+3. **Segment Operations:** Merge, split, or delete segments as needed for optimal phrasing.
+
+#### **Live ASR Microphone 🎤**
+A powerful real-time speech recognition tool for rapid corrections:
+- **One-Click Recording:** Language experts can speak directly to update segment text.
+- **Language-Aware:** Automatically recognizes the target language for accurate transcription.
+- **Instant Updates:** Spoken input immediately replaces or appends to the segment text.
+
+#### **Gemini AI Translation Assistant 🤖**
+Built-in AI-powered translation refinement:
+- **Customizable Prompts:** Modify the translation behavior via the prompt bar at the top (e.g., \"Use casual conversational language, not formal\").
+- **Context-Aware:** Re-generates translations with full context understanding.
+- **One-Click Retry:** Click the brain icon (🧠) next to any segment to regenerate its translation with your custom instructions.
+
+#### **Multi-Speaker Voice Selection 🎭**
+When the system detects multiple speakers in the video:
+- **Automatic Detection:** Speaker diarization identifies different speakers (Speaker 1, Speaker 2, etc.).
+- **Voice Customization:** Each speaker gets their own voice dropdown menu.
+- **Gender \u0026 Style:** Choose from Neural2, Journey, and Chirp3 voices with gender labels (Male/Female).
+- **Persistent Settings:** Selected voices are saved and applied across all segments for that speaker.
+
+#### **Intelligent Redubbing**
+After language experts make changes, the redubbing process is highly optimized:
+
+- **Smart Change Detection:** Only modified segments are regenerated, reusing cached audio for unchanged parts.
+- **Voice Consistency:** Speaker-specific voice selections are preserved and applied automatically.
+- **Instant Updates:** Changes appear immediately after clicking \"Update Dub\".
+- **Multi-Speaker Output:** Final video maintains distinct voices for each speaker, creating natural-sounding conversations.
+
+**Example Workflow:**
+1. Review the initial dub in the video player
+2. Identify a segment that needs refinement
+3. Use the live ASR mic to speak a better translation, or
+4. Manually edit the text, or  
+5. Use the Gemini brain tool with a custom prompt
+6. Select appropriate voices for Speaker 2 and Speaker 3
+7. Click \"Update Dub\" → Only changed segments regenerate
+8. Download the final multi-speaker dubbed video
+
+This end-to-end expert review workflow ensures dubbing quality that rivals professional studios, while maintaining the speed and efficiency of AI automation.
+
 ---
 
 ## 6. Installation & Run

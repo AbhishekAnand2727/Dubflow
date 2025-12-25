@@ -336,15 +336,15 @@ def log_event(job_id, message):
 def get_logs(job_id):
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT message, timestamp FROM events WHERE job_id = ? ORDER BY id ASC", (job_id,))
+    c.execute("SELECT message, created_at FROM events WHERE job_id = ? ORDER BY id ASC", (job_id,))
     rows = c.fetchall()
     conn.close()
-    return [f"[{r['timestamp']}] {r['message']}" for r in rows]
+    return [f"[{r['created_at']}] {r['message']}" for r in rows]
 
 def get_events(job_id):
     conn = get_db()
     c = conn.cursor()
-    c.execute("SELECT message, timestamp FROM events WHERE job_id = ? ORDER BY id ASC", (job_id,))
+    c.execute("SELECT message, created_at FROM events WHERE job_id = ? ORDER BY id ASC", (job_id,))
     rows = c.fetchall()
     conn.close()
     return [dict(r) for r in rows]
