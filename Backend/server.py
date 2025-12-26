@@ -537,6 +537,15 @@ async def get_result(task_id: str):
     if original_video_path and os.path.exists(original_video_path):
         response["original_video_url"] = original_video_url
     
+    # Add speaker overrides if available
+    if job.get('speaker_overrides'):
+        try:
+            response["speaker_overrides"] = json.loads(job['speaker_overrides'])
+        except (json.JSONDecodeError, TypeError):
+            response["speaker_overrides"] = {}
+    else:
+        response["speaker_overrides"] = {}
+    
     return response
 
 @app.get("/api/download/{task_id}/{filepath:path}")

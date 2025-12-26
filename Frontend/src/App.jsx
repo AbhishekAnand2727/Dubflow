@@ -533,7 +533,7 @@ function App() {
           Indic Video Dubbing
         </h1>
         <p className="text-xl text-slate-600 font-medium max-w-lg mx-auto">
-          Translate and lip-sync your content into 11 Indian languages instantly.
+          Translate and dub your content into 11 Indian languages instantly.
         </p>
       </div>
 
