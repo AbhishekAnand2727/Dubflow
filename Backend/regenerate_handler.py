@@ -11,6 +11,7 @@ import json
 from pydub import AudioSegment
 import math
 import traceback
+import uuid
 
 import database
 from srt_utils import parse_srt, parse_srt_time, format_srt_time, write_srt
@@ -38,6 +39,36 @@ def get_media_duration_ms(file_path):
     except Exception as e:
         print(f"Error getting duration for {file_path}: {e}")
         return 0
+
+def extract_audio_segment(video_path, start_ms, end_ms):
+    """
+    Extract a specific audio segment from a video file.
+    Returns AudioSegment or None if extraction fails.
+    """
+    try:
+        # Use ffmpeg to extract the specific audio segment
+        temp_audio = f"temp_extract_{uuid.uuid4().hex}.wav"
+        start_sec = start_ms / 1000.0
+        duration_sec = (end_ms - start_ms) / 1000.0
+        
+        subprocess.run([
+            "ffmpeg", "-y",
+            "-i", video_path,
+            "-ss", str(start_sec),
+            "-t", str(duration_sec),
+            "-vn",  # No video
+            "-acodec", "pcm_s16le",  # Raw audio
+            "-ar", "44100",  # Sample rate
+            "-ac", "2",  # Stereo
+            temp_audio
+        ], check=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+        
+        audio_segment = AudioSegment.from_file(temp_audio, format="wav")
+        os.remove(temp_audio)
+        return audio_segment
+    except Exception as e:
+        print(f"Failed to extract audio segment: {e}")
+        return None
 
 def regenerate_dubbing_task(task_id: str, edited_segments: list, speaker_overrides: dict = {}, jobs_dir: str = None):
     """
@@ -67,9 +98,8 @@ def regenerate_dubbing_task(task_id: str, edited_segments: list, speaker_overrid
         # Update job status
         database.update_job_status(task_id, status="processing", message="Starting regeneration...")
         
-        # Save speaker overrides to database
+        # Log received speaker overrides (will save to DB after comparison)
         print(f"[Regenerate] Received speaker_overrides: {speaker_overrides}")
-        database.update_speaker_overrides(task_id, speaker_overrides)
         database.log_event(task_id, f"Speaker overrides received: {json.dumps(speaker_overrides)}")
         
         job = database.get_job(task_id)
@@ -171,8 +201,26 @@ def regenerate_dubbing_task(task_id: str, edited_segments: list, speaker_overrid
         if edited_segments:
             database.log_event(task_id, f"DEBUG: Receive Seg 0 Target: '{edited_segments[0].get('target_text', 'N/A')}'")
         
+        # Debug: Show what we loaded from original files
+        print(f"[Regenerate] Loaded {len(original_source_segments)} source segments and {len(original_target_segments)} target segments from SRT files")
+        if original_source_segments:
+            print(f"[Regenerate] Original Source Seg 0: '{original_source_segments[0].get('text', 'N/A')}'")
+        if original_target_segments:
+            print(f"[Regenerate] Original Target Seg 0: '{original_target_segments[0].get('text', 'N/A')}'")
+        
         # Identify changed segments by comparing with original
         database.update_job_status(task_id, status="processing", message="Comparing segments...")
+        
+        # Get previous voice overrides from database for comparison
+        old_speaker_overrides = {}
+        if job.get('speaker_overrides'):
+            try:
+                old_speaker_overrides = json.loads(job['speaker_overrides'])
+            except:
+                old_speaker_overrides = {}
+        
+        print(f"[Regenerate] Old speaker overrides from DB: {old_speaker_overrides}")
+        print(f"[Regenerate] New speaker overrides from request: {speaker_overrides}")
         
         changed_indices = []
         for i, edited_seg in enumerate(edited_segments):
@@ -202,17 +250,57 @@ def regenerate_dubbing_task(task_id: str, edited_segments: list, speaker_overrid
                     print(f"CRASH PARSING TIMESTAMP (Original): '{orig_target.get('start')}'. Error: {e}")
                     raise
                 
-                source_changed = edited_seg['text'] != orig_source.get('text', '')
-                target_changed = edited_seg['target_text'] != orig_target.get('text', '')
+                # Normalize text for comparison (strip speaker tags)
+                import re
+                def normalize_text(text):
+                    """Remove speaker tags and extra whitespace for comparison"""
+                    if not text:
+                        return ""
+                    # Remove [Speaker X] tags
+                    text = re.sub(r'\[Speaker \d+\]\s*', '', text)
+                    # Remove "Speaker X:" format
+                    text = re.sub(r'Speaker \d+:\s*', '', text)
+                    return text.strip()
+                
+                edited_source_normalized = normalize_text(edited_seg['text'])
+                orig_source_normalized = normalize_text(orig_source.get('text', ''))
+                edited_target_normalized = normalize_text(edited_seg['target_text'])
+                orig_target_normalized = normalize_text(orig_target.get('text', ''))
+                
+                source_changed = edited_source_normalized != orig_source_normalized
+                target_changed = edited_target_normalized != orig_target_normalized
                 timing_changed = (edited_start_ms != orig_start_ms or edited_end_ms != orig_end_ms)
                 
-                if source_changed or target_changed or timing_changed:
+                # Check if voice assignment changed for this speaker
+                speaker = edited_seg.get('speaker', 'Speaker 1')
+                old_voice = old_speaker_overrides.get(speaker, job.get('target_voice'))
+                new_voice = speaker_overrides.get(speaker, job.get('target_voice'))
+                voice_changed = (old_voice != new_voice)
+                
+                # Debug logging for first 3 segments
+                if i < 3:
+                    print(f"[Regenerate] Seg {i} comparison:")
+                    print(f"  Source: '{edited_source_normalized}' vs '{orig_source_normalized}' = {source_changed}")
+                    print(f"  Target: '{edited_target_normalized}' vs '{orig_target_normalized}' = {target_changed}")
+                    print(f"  Timing: {edited_start_ms},{edited_end_ms} vs {orig_start_ms},{orig_end_ms} = {timing_changed}")
+                    print(f"  Voice: {new_voice} vs {old_voice} = {voice_changed}")
+                
+                # Debug voice comparison for all segments with voice overrides
+                if speaker in speaker_overrides or speaker in old_speaker_overrides:
+                    print(f"[Regenerate] Seg {i} ({speaker}): old_voice={old_voice}, new_voice={new_voice}, changed={voice_changed}")
+                
+                if source_changed or target_changed or timing_changed or voice_changed:
                     changed_indices.append(i)
+                    print(f"[Regenerate] Seg {i}: CHANGED - source={source_changed}, target={target_changed}, timing={timing_changed}, voice={voice_changed}")
         
         database.update_job_status(task_id, status="processing", 
                                   message=f"Found {len(changed_indices)} changed segments out of {len(edited_segments)}")
         
         print(f"[Regenerate] Changed segments: {changed_indices}")
+        
+        # NOW save speaker overrides to database (after comparison)
+        database.update_speaker_overrides(task_id, speaker_overrides)
+        print(f"[Regenerate] Saved new speaker overrides to database")
         
         # Now save edited segments to SRT files
         # Save edited target SRT
@@ -302,51 +390,78 @@ def regenerate_dubbing_task(task_id: str, edited_segments: list, speaker_overrid
             audio_segment = None
             
             if i in changed_indices:
+                # Segment has changed - regenerate TTS
                 print(f"[Regenerate] Seg {i}: Generating TTS for changed segment")
                 database.update_job_status(task_id, status="processing", 
                                           message=f"Generating audio for segment {i+1}/{len(edited_segments)}...")
+                
+                try:
+                    # Use process_segment_task which handles TTS generation with cache
+                    # Pass forced_target_text since we already have the translation
+                    _, audio_segment, _, _, _ = process_segment_task(
+                        seg=segment_for_processing,
+                        i=i,
+                        total=len(edited_segments),
+                        input_lang=job['input_lang'],
+                        output_lang=job['output_lang'],
+                        target_voice=voice_id,
+                        speed=job.get('speed', 1.0),
+                        forced_target_text=seg['target_text'],  # Use edited text directly
+                        voice_manager=voice_manager,
+                        cache=cache,
+                        temp_dir=temp_dir,
+                        job_id=task_id,
+                        target_wpm=job.get('wpm')
+                    )
+                except Exception as e:
+                    print(f"[Regenerate] Error generating TTS for segment {i}: {e}")
+                    raise
             else:
-                print(f"[Regenerate] Seg {i}: Checking cache for unchanged segment")
+                # Segment unchanged - extract from existing video (much faster!)
+                print(f"[Regenerate] Seg {i}: Extracting audio from existing video (unchanged)")
+                database.update_job_status(task_id, status="processing", 
+                                          message=f"Extracting audio for segment {i+1}/{len(edited_segments)}...")
+                
+                try:
+                    audio_segment = extract_audio_segment(existing_dubbed, start_ms, end_ms)
+                    if not audio_segment:
+                        # Fallback to regeneration if extraction fails
+                        print(f"[Regenerate] Seg {i}: Extraction failed, falling back to TTS regeneration")
+                        _, audio_segment, _, _, _ = process_segment_task(
+                            seg=segment_for_processing,
+                            i=i,
+                            total=len(edited_segments),
+                            input_lang=job['input_lang'],
+                            output_lang=job['output_lang'],
+                            target_voice=voice_id,
+                            speed=job.get('speed', 1.0),
+                            forced_target_text=seg['target_text'],
+                            voice_manager=voice_manager,
+                            cache=cache,
+                            temp_dir=temp_dir,
+                            job_id=task_id,
+                            target_wpm=job.get('wpm')
+                        )
+                except Exception as e:
+                    print(f"[Regenerate] Error extracting audio for segment {i}: {e}")
+                    raise
             
-            try:
-                # Use process_segment_task which handles TTS generation with cache
-                # Pass forced_target_text since we already have the translation
-                _, audio_segment, _, _, _ = process_segment_task(
-                    seg=segment_for_processing,
-                    i=i,
-                    total=len(edited_segments),
-                    input_lang=job['input_lang'],
-                    output_lang=job['output_lang'],
-                    target_voice=voice_id,
-                    speed=job.get('speed', 1.0),
-                    forced_target_text=seg['target_text'],  # Use edited text directly
-                    voice_manager=voice_manager,
-                    cache=cache,
-                    temp_dir=temp_dir,
-                    job_id=task_id,
-                    target_wpm=job.get('wpm')
-                )
-                
-                # Overlay audio on canvas
-                if audio_segment:
-                    combined_audio = combined_audio.overlay(audio_segment, position=start_ms)
-                else:
-                    print(f"[Regenerate] Warning: No audio generated for segment {i}")
-                    database.log_event(task_id, f"Warning: No audio for segment {i}")
-                
-                final_db_segments.append({
-                    'start': start_ms,
-                    'end': end_ms,
-                    'text': seg['text'],
-                    'target_text': seg['target_text'],
-                    'deleted': False,
-                    'speaker': seg.get('speaker', 'Speaker 1'),
-                    'status': 'edited' # Mark as edited
-                })
-                
-            except Exception as e:
-                print(f"[Regenerate] Error processing segment {i}: {e}")
-                raise
+            # Overlay audio on canvas (outside if/else - applies to all segments)
+            if audio_segment:
+                combined_audio = combined_audio.overlay(audio_segment, position=start_ms)
+            else:
+                print(f"[Regenerate] Warning: No audio generated for segment {i}")
+                database.log_event(task_id, f"Warning: No audio for segment {i}")
+            
+            final_db_segments.append({
+                'start': start_ms,
+                'end': end_ms,
+                'text': seg['text'],
+                'target_text': seg['target_text'],
+                'deleted': False,
+                'speaker': seg.get('speaker', 'Speaker 1'),
+                'status': 'edited' # Mark as edited
+            })
         
         # Export to file
         merged_audio_path = os.path.join(output_dir, "merged_audio_regen.wav")
@@ -399,7 +514,9 @@ def regenerate_dubbing_task(task_id: str, edited_segments: list, speaker_overrid
              existing_dubbed = regenerated_video_path # Update reference for return value
         
         database.update_job_status(task_id, status="completed", message="Regeneration complete!")
-        print(f"[Regenerate] Complete! Processed {len(changed_indices)} changed segments")
+        unchanged_count = len(edited_segments) - len(changed_indices)
+        print(f"[Regenerate] Complete! Regenerated {len(changed_indices)} segments, reused {unchanged_count} from existing video")
+        database.log_event(task_id, f"Optimization: {len(changed_indices)} regenerated, {unchanged_count} extracted from cache")
         
         # Save logs on success
         try:
